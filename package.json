@@ -5,10 +5,18 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
+    "build:exe": "node build.js",
     "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "bin": {
+    "githubhelper": "server.js"
   },
   "private": true,
   "dependencies": {
     "express": "^4.21.2"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.2",
+    "postject": "^1.0.0-alpha.6"
   }
 }

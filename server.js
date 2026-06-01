@@ -11,16 +11,66 @@
 const express = require('express');
 const path = require('path');
 const fs = require('fs');
-const { execFile } = require('child_process');
+const { execFile, spawn } = require('child_process');
 
-const PORT = process.env.PORT || 4317;
-// Default to the parent of this repo (the WebstormProjects folder) so every
-// sibling project is discoverable. Override with PROJECTS_ROOT.
-const PROJECTS_ROOT = process.env.PROJECTS_ROOT || path.dirname(process.cwd());
+// Detect whether we are running as a packaged single-executable (.exe).
+let IS_PACKAGED = false;
+try { IS_PACKAGED = require('node:sea').isSea(); } catch { /* not a SEA build */ }
+
+// Web assets are baked into the bundle at build time (see build.js, which
+// injects __EMBEDDED_ASSETS__ via esbuild). In dev they are served from disk.
+const EMBEDDED_ASSETS = typeof __EMBEDDED_ASSETS__ !== 'undefined' ? __EMBEDDED_ASSETS__ : null;
+
+// --- CLI args / config ------------------------------------------------------
+function argValue(name) {
+  const eq = process.argv.find((a) => a.startsWith(`--${name}=`));
+  if (eq) return eq.split('=').slice(1).join('=');
+  const i = process.argv.indexOf(`--${name}`);
+  if (i !== -1 && process.argv[i + 1] && !process.argv[i + 1].startsWith('-')) return process.argv[i + 1];
+  return null;
+}
+
+const PORT = argValue('port') || process.env.PORT || 4317;
+
+// The folder that holds your project repos. Resolution order:
+//   1. --root <dir> / PROJECTS_ROOT env
+//   2. the current directory, if it directly contains git repos
+//      (drop the .exe in your projects folder and run it)
+//   3. the parent of the current directory, if that contains git repos
+//      (running `node server.js` from inside this repo)
+//   4. the current directory
+function hasRepoChild(dir) {
+  try {
+    return fs.readdirSync(dir, { withFileTypes: true })
+      .some((e) => e.isDirectory() && fs.existsSync(path.join(dir, e.name, '.git')));
+  } catch { return false; }
+}
+function detectProjectsRoot() {
+  const explicit = argValue('root') || process.env.PROJECTS_ROOT;
+  if (explicit) return path.resolve(explicit);
+  const cwd = process.cwd();
+  if (hasRepoChild(cwd)) return cwd;
+  const parent = path.dirname(cwd);
+  if (hasRepoChild(parent)) return parent;
+  return cwd;
+}
+const PROJECTS_ROOT = detectProjectsRoot();
 
 const app = express();
 app.use(express.json());
-app.use(express.static(path.join(__dirname, 'public')));
+
+// Static assets: embedded map when packaged, disk in dev.
+if (EMBEDDED_ASSETS) {
+  const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'application/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8' };
+  app.get(['/', '/index.html', '/app.js', '/styles.css'], (req, res) => {
+    const name = req.path === '/' ? 'index.html' : req.path.replace(/^\//, '');
+    const body = EMBEDDED_ASSETS[name];
+    if (body == null) return res.status(404).end();
+    res.type(TYPES[path.extname(name)] || 'text/plain').send(body);
+  });
+} else {
+  app.use(express.static(path.join(__dirname, 'public')));
+}
 
 // ---------------------------------------------------------------------------
 // Process helpers
@@ -807,7 +857,43 @@ app.post('/api/refresh', (req, res) => {
   res.json({ ok: true });
 });
 
-app.listen(PORT, () => {
-  console.log(`\n  GitHubHelper dashboard running at  http://localhost:${PORT}`);
-  console.log(`  Scanning local projects under      ${PROJECTS_ROOT}\n`);
+async function checkTooling() {
+  const warn = [];
+  if (!(await run('git', ['--version'])).ok) warn.push('git was not found on PATH — local repo scanning will not work.');
+  const gh = await run('gh', ['--version']);
+  if (!gh.ok) warn.push('gh (GitHub CLI) was not found on PATH — GitHub data and actions will not work.');
+  else if (!(await run('gh', ['auth', 'status'])).ok) warn.push('gh is installed but not authenticated — run `gh auth login`. GitHub data will be unavailable until then.');
+  return warn;
+}
+
+function openBrowser(url) {
+  try {
+    if (process.platform === 'win32') spawn('cmd', ['/c', 'start', '', url], { detached: true, stdio: 'ignore' }).unref();
+    else if (process.platform === 'darwin') spawn('open', [url], { detached: true, stdio: 'ignore' }).unref();
+    else spawn('xdg-open', [url], { detached: true, stdio: 'ignore' }).unref();
+  } catch { /* ignore */ }
+}
+
+const server = app.listen(PORT, async () => {
+  const url = `http://localhost:${PORT}`;
+  console.log(`\n  GitHubHelper dashboard running at  ${url}`);
+  console.log(`  Scanning local projects under      ${PROJECTS_ROOT}`);
+  const warnings = await checkTooling();
+  if (warnings.length) {
+    console.log('');
+    for (const w of warnings) console.log(`  ⚠ ${w}`);
+  }
+  console.log('');
+  if (IS_PACKAGED && !process.env.NO_OPEN) {
+    console.log('  Opening your browser…  (press Ctrl+C to stop the dashboard)\n');
+    openBrowser(url);
+  }
+});
+
+server.on('error', (e) => {
+  if (e.code === 'EADDRINUSE') {
+    console.error(`\n  Port ${PORT} is already in use. Start with a different port, e.g.:\n    githubhelper --port 5000\n`);
+    process.exit(1);
+  }
+  throw e;
 });
