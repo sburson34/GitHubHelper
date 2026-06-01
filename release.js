@@ -19,6 +19,7 @@ const { execFileSync } = require('child_process');
 const ROOT = __dirname;
 const REPO = 'sburson34/GitHubHelper';
 const EXE = path.join(ROOT, 'dist', 'githubhelper.exe');
+const LAUNCHER = path.join(ROOT, 'githubhelper.cmd');
 
 function sh(cmd, args, opts = {}) {
   return execFileSync(cmd, args, { cwd: ROOT, stdio: 'inherit', ...opts });
@@ -89,17 +90,20 @@ sh('git', ['push', 'origin', tag]);
 // --- 5. Publish the GitHub Release ------------------------------------------
 const notes = `Standalone Windows executable of the GitHubHelper dashboard — a localhost view of branch status across your local repos and GitHub, with click-through diffs and inline push/merge/delete actions.
 
-## Download & run
-1. Download **githubhelper.exe** below.
-2. The machine needs **git** and **GitHub CLI (\`gh\`)** installed, and \`gh auth login\` run once.
-3. Drop the exe in your projects folder and double-click — it auto-detects the folder, starts the server, and opens your browser. Or run from anywhere: \`githubhelper.exe --root C:\\path\\to\\projects\`.
+Requires **git** and **GitHub CLI (\`gh\`)** installed, with \`gh auth login\` run once. No Node, source, or API key needed.
 
-Flags: \`--root <dir>\`, \`--port <n>\` (default 4317).
+## Easiest: the launcher (no manual copying)
+Download **githubhelper.cmd** (tiny), drop it in your projects folder, and double-click. It downloads the latest **githubhelper.exe** right next to itself and runs it — no browser, no Downloads folder. Run \`githubhelper.cmd update\` to refresh to the newest release later.
 
-No Node, source, or API key required — the exe bundles everything and drives your local git/gh. Windows SmartScreen may warn the first time (unsigned binary): More info → Run anyway.`;
+## Or grab the exe directly
+Download **githubhelper.exe**, drop it in your projects folder, and double-click — it auto-detects the folder, starts the server, and opens your browser. Or run from anywhere: \`githubhelper.exe --root C:\\path\\to\\projects\`.
+
+Flags: \`--root <dir>\`, \`--port <n>\` (default 4317). Windows SmartScreen may warn the first time (unsigned binary): More info → Run anyway.`;
 
 console.log('\n▶ Creating GitHub release…\n');
-sh('gh', ['release', 'create', tag, EXE,
+const assets = [EXE];
+if (fs.existsSync(LAUNCHER)) assets.push(LAUNCHER);
+sh('gh', ['release', 'create', tag, ...assets,
   '--repo', REPO,
   '--title', `GitHubHelper ${tag} — standalone dashboard`,
   '--notes', notes,
