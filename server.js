@@ -1652,4 +1652,17 @@ process.on('uncaughtException', (e) => {
   holdOpenThenExit(1);
 });
 
+// A stray rejected promise would otherwise take Node down (its default), which
+// looks like "Failed to fetch" in the browser. Once the server is up, log it and
+// keep running — same policy as uncaughtException above.
+process.on('unhandledRejection', (reason) => {
+  const e = reason instanceof Error ? reason : new Error(String(reason));
+  if (started) {
+    console.error(`\n  ⚠ Unhandled promise rejection (dashboard still running): ${e.stack || e.message}\n`);
+    return;
+  }
+  console.error(`\n  Failed to start: ${e.stack || e.message}\n`);
+  holdOpenThenExit(1);
+});
+
 listenWithFallback(PORT, MAX_PORT_TRIES);

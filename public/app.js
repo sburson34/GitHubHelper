@@ -911,6 +911,8 @@ let sessionsLoading = false;
 let lastSig = null;
 let unchangedCount = 0;
 let autoPaused = false;
+let sessionsLoadedOnce = false; // have we ever rendered sessions successfully?
+let sessionsFailures = 0;       // consecutive fetch failures (for graceful retry)
 
 function setTab(tab) {
   activeTab = tab;
@@ -962,6 +964,8 @@ async function loadSessions(reason) {
     const data = await res.json();
     sessionsMode = data.summarySource === 'claude' ? 'claude' : 'heuristic';
     renderSessions(data);
+    sessionsLoadedOnce = true;
+    sessionsFailures = 0;
 
     const sig = sessionSignature(data.sessions);
     if (reason === 'auto') {
@@ -977,7 +981,17 @@ async function loadSessions(reason) {
     lastSig = sig;
     updateSessionsStatus(data);
   } catch (e) {
-    $('#sessions-content').innerHTML = `<div class="error">Failed to load sessions: ${esc(e.message)}</div>`;
+    sessionsFailures++;
+    // "Failed to fetch" means the server was briefly unreachable (e.g. it was
+    // restarting or updating). Don't wipe a working view over a transient blip —
+    // keep it, show a quiet "reconnecting" status, and let the poll retry. Only
+    // fall back to a full error if we never loaded, or after several failures.
+    if (sessionsLoadedOnce && sessionsFailures < 4) {
+      const el = $('#sessions-status');
+      if (el) el.innerHTML = `<span class="dot paused"></span>Lost connection to the dashboard — retrying… <span class="muted">(attempt ${sessionsFailures})</span>`;
+    } else {
+      $('#sessions-content').innerHTML = `<div class="error">Failed to load sessions: ${esc(e.message)}. Retrying…</div>`;
+    }
   } finally {
     sessionsLoading = false;
   }
