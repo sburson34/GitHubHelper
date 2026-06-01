@@ -411,6 +411,18 @@ body.tab-sessions .controls { display: none; }
 /* Sessions grid (reuses .branch-table) --------------------------------- */
 .session-table .col-proj { font-weight: 600; white-space: nowrap; }
 .session-table .col-about { max-width: 360px; }
+.session-table .col-about .about-text.clamped {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;       /* show at most 4 lines, then an ellipsis */
+  line-clamp: 4;
+  overflow: hidden;
+}
+/* Only summaries that actually overflow get the click-to-expand affordance. */
+.session-table .col-about .about-text.truncated { cursor: pointer; }
+.session-table .col-about .about-text.truncated:hover { color: var(--accent); }
+/* An expanded summary can be clicked again to re-collapse it. */
+.session-table .col-about .about-text:not(.clamped) { cursor: pointer; }
 .session-table .col-about .about-sub { color: var(--text-dim); font-size: 0.76rem; margin-top: 0.2rem; }
 .session-table .col-lastcmd {
   color: var(--text-dim); max-width: 300px;

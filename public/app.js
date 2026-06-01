@@ -894,6 +894,9 @@ async function runPrAction(pract, number, head) {
 
 const TAB_KEY = 'ghhelper.activeTab';
 let activeTab = 'projects';
+// Session ids whose "What I'm working on" cell the user expanded — kept so the
+// expansion survives the tab's periodic auto-refresh re-render.
+const expandedAbout = new Set();
 
 // Auto-refresh state. Heuristic mode polls every 5s (no API cost). Claude mode
 // polls every 30s but only while the tab/window is focused, so it won't call
@@ -1006,10 +1009,12 @@ function sessionRow(s) {
     : '<span class="badge s-done">✓ done</span>';
   const finished = running ? '<span class="s-active">active now</span>' : timeAgo(s.finishedAt);
   const aiSub = s.aiTitle && s.aiTitle !== s.about ? `<div class="about-sub">${esc(s.aiTitle)}</div>` : '';
+  // Clamp the summary to 4 lines unless the user has expanded this row.
+  const clamp = expandedAbout.has(s.sessionId) ? '' : 'clamped';
   return `
     <tr class="${running ? 'lvl-ok' : 'lvl-info'}">
       <td class="col-proj" title="${esc(s.projectPath)}">${esc(s.project)}</td>
-      <td class="col-about">${esc(s.about || '—')}${aiSub}</td>
+      <td class="col-about"><div class="about-text ${clamp}" data-sid="${esc(s.sessionId)}">${esc(s.about || '—')}</div>${aiSub}</td>
       <td class="col-lastcmd">${esc(s.lastCommand || '')}</td>
       <td class="col-status">${statusBadge}</td>
       <td class="col-finished">${finished}</td>
@@ -1024,7 +1029,31 @@ function renderSessions(data) {
     return;
   }
   el.innerHTML = `<table class="branch-table session-table">${sessionHead()}<tbody>${list.map(sessionRow).join('')}</tbody></table>`;
+  markTruncatedAbouts();
 }
+
+// Flag clamped summaries that actually overflow 4 lines, so only those get the
+// click-to-expand affordance (cursor + hover hint).
+function markTruncatedAbouts() {
+  document.querySelectorAll('#sessions-content .about-text.clamped').forEach((el) => {
+    el.classList.toggle('truncated', el.scrollHeight - el.clientHeight > 2);
+  });
+}
+
+// Click a summary to expand it to full text (and click again to re-clamp).
+$('#sessions-content').addEventListener('click', (e) => {
+  const about = e.target.closest('.about-text');
+  if (!about) return;
+  const sid = about.dataset.sid;
+  if (about.classList.contains('clamped')) {
+    about.classList.remove('clamped', 'truncated');
+    if (sid) expandedAbout.add(sid);
+  } else {
+    about.classList.add('clamped');
+    if (sid) expandedAbout.delete(sid);
+    about.classList.toggle('truncated', about.scrollHeight - about.clientHeight > 2);
+  }
+});
 
 // Manual refresh: bust the server-side caches, reset the idle counter, reload.
 $('#sessions-refresh').addEventListener('click', async () => {
