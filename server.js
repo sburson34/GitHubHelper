@@ -76,11 +76,84 @@ if (EMBEDDED_ASSETS) {
 }
 
 // ---------------------------------------------------------------------------
+// Read-only mode (one-way gate: GitHub/git -> app, never the other way)
+// ---------------------------------------------------------------------------
+// When on, the dashboard only reads and reports — every command that would
+// change local git state or GitHub is refused. Defaults ON for safety and is
+// reset to ON on every restart; it is toggled at runtime from the UI.
+let readOnly = true;
+
+// Decide whether a (cmd, args) invocation would change anything. Reads (status,
+// log, diff, rev-list, for-each-ref, gh api GET, gh *list, …) return false;
+// writes (push, merge, checkout, branch -d, gh pr merge, gh api -X DELETE, …)
+// return true. Conservative: anything not recognized as a read is treated as a
+// read only when it clearly cannot mutate, otherwise as a write.
+function isMutatingCommand(cmd, args) {
+  const a = args.map(String);
+  if (cmd === 'git') {
+    const sub = a[0] === '-C' ? a[2] : a[0];
+    const WRITE = new Set([
+      'push', 'merge', 'commit', 'rebase', 'reset', 'pull', 'fetch', 'clone',
+      'checkout', 'switch', 'cherry-pick', 'revert', 'am', 'apply', 'clean',
+      'stash', 'gc', 'prune', 'update-ref', 'mv', 'rm', 'add', 'restore', 'notes',
+    ]);
+    if (WRITE.has(sub)) return true;
+    if (sub === 'branch')
+      return a.some((x) => ['-d', '-D', '--delete', '-m', '-M', '--move', '-c', '-C', '--copy', '-u', '--set-upstream-to', '--unset-upstream', '--edit-description'].includes(x));
+    if (sub === 'tag') return !a.includes('-l') && !a.includes('--list'); // bare/`-a` creates; `-l` lists
+    if (sub === 'remote') return a.some((x) => ['add', 'remove', 'rm', 'set-url', 'rename', 'prune', 'set-head'].includes(x));
+    if (sub === 'config') return !a.some((x) => ['--get', '--get-all', '--get-regexp', '--list', '-l'].includes(x));
+    if (sub === 'symbolic-ref') return !a.includes('--quiet') && a.length > (a[0] === '-C' ? 4 : 2); // setting a ref takes a value
+    return false; // rev-parse, status, log, diff, rev-list, for-each-ref, show, describe, …
+  }
+  if (cmd === 'gh') {
+    const sub = a[0];
+    if (sub === 'api') {
+      const i = a.findIndex((x) => x === '-X' || x === '--method');
+      if (i !== -1 && a[i + 1] && a[i + 1].toUpperCase() !== 'GET') return true;
+      // -f/--field/-F/--raw-field/--input make gh default to POST.
+      return a.some((x) => ['-f', '--field', '-F', '--raw-field', '--input'].includes(x));
+    }
+    // <noun> <verb> form: treat known mutating verbs as writes.
+    const MUT_VERBS = new Set([
+      'create', 'delete', 'merge', 'close', 'edit', 'rename', 'transfer', 'fork',
+      'add', 'remove', 'set', 'set-default', 'sync', 'restore', 'ready', 'reopen',
+      'comment', 'review', 'lock', 'unlock', 'pin', 'unpin', 'archive', 'clone',
+      'checkout', 'rerun', 'cancel', 'disable', 'enable', 'approve',
+    ]);
+    return a.length >= 2 && MUT_VERBS.has(a[1]);
+  }
+  return false;
+}
+
+// Express guard for the mutating HTTP routes (push/merge/delete-branch).
+function denyWhenReadOnly(req, res, next) {
+  if (readOnly) {
+    return res.status(403).json({
+      ok: false,
+      readOnly: true,
+      error: 'Read-only mode is ON — the dashboard will not make any changes to git or GitHub. Turn off read-only to allow this action.',
+    });
+  }
+  next();
+}
+
+// ---------------------------------------------------------------------------
 // Process helpers
 // ---------------------------------------------------------------------------
 
 /** Run a binary with args, never throwing — returns {ok, stdout, stderr, code}. */
 function run(cmd, args, opts = {}) {
+  // One-way gate: in read-only mode, refuse to execute anything that mutates.
+  if (readOnly && isMutatingCommand(cmd, args)) {
+    return Promise.resolve({
+      ok: false,
+      code: 1,
+      stdout: '',
+      stderr: 'Blocked: read-only mode is on — no changes are made.',
+      blockedByReadOnly: true,
+    });
+  }
   return new Promise((resolve) => {
     execFile(
       cmd,
@@ -702,7 +775,7 @@ async function getProject(id) {
 app.get('/api/projects', async (req, res) => {
   try {
     const projects = await listProjects();
-    res.json({ projects, root: PROJECTS_ROOT });
+    res.json({ projects, root: PROJECTS_ROOT, readOnly });
   } catch (e) {
     res.status(500).json({ error: String(e) });
   }
@@ -752,7 +825,7 @@ app.get('/api/projects/:id/branch', async (req, res) => {
 });
 
 // Push a local branch to origin (sets upstream).
-app.post('/api/projects/:id/push', async (req, res) => {
+app.post('/api/projects/:id/push', denyWhenReadOnly, async (req, res) => {
   try {
     const project = await getProject(req.params.id);
     if (!project || !project.hasLocal) return res.status(400).json({ error: 'No local checkout' });
@@ -772,7 +845,7 @@ app.post('/api/projects/:id/push', async (req, res) => {
 
 // Merge: local => merge branch into default (clean tree required);
 //        remote => merge the branch's open PR via gh.
-app.post('/api/projects/:id/merge', async (req, res) => {
+app.post('/api/projects/:id/merge', denyWhenReadOnly, async (req, res) => {
   try {
     const project = await getProject(req.params.id);
     if (!project) return res.status(404).json({ error: 'Project not found' });
@@ -814,7 +887,7 @@ app.post('/api/projects/:id/merge', async (req, res) => {
 });
 
 // Delete a branch (local or remote).
-app.post('/api/projects/:id/delete-branch', async (req, res) => {
+app.post('/api/projects/:id/delete-branch', denyWhenReadOnly, async (req, res) => {
   try {
     const project = await getProject(req.params.id);
     if (!project) return res.status(404).json({ error: 'Project not found' });
@@ -858,6 +931,16 @@ app.post('/api/projects/:id/delete-branch', async (req, res) => {
 app.post('/api/refresh', (req, res) => {
   projectCache = { ts: 0, data: null };
   res.json({ ok: true });
+});
+
+// Read-only switch. GET reports the current state; POST { readOnly: bool } sets it.
+app.get('/api/readonly', (req, res) => res.json({ readOnly }));
+app.post('/api/readonly', (req, res) => {
+  const { readOnly: want } = req.body || {};
+  if (typeof want !== 'boolean') return res.status(400).json({ error: 'Body must be { "readOnly": true | false }' });
+  readOnly = want;
+  console.log(`  Read-only mode ${readOnly ? 'ENABLED — no changes will be made' : 'DISABLED — push/merge/delete are now allowed'}.`);
+  res.json({ readOnly });
 });
 
 async function checkTooling() {

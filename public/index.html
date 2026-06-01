@@ -20,9 +20,18 @@
           <input id="project-search" type="text" placeholder="Search projects…" autocomplete="off" spellcheck="false" />
           <div id="project-list" class="combo-list" hidden></div>
         </div>
+        <label class="switch" id="readonly-switch" title="When on, the dashboard only reads from git &amp; GitHub and makes no changes. All push/merge/delete actions are disabled.">
+          <input type="checkbox" id="readonly-input" checked />
+          <span class="slider"></span>
+          <span class="switch-text">Read-only</span>
+        </label>
         <button id="refresh-btn" title="Re-scan projects">↻ Refresh</button>
       </div>
     </header>
+
+    <div class="readonly-banner" role="status">
+      <span>🔒 Read-only mode is on — the dashboard is only reading and reporting. No changes are made to git or GitHub. Toggle “Read-only” off to enable push, merge, and delete.</span>
+    </div>
 
     <main id="content">
       <div class="placeholder">

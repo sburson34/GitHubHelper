@@ -6,6 +6,7 @@ const rootInfo = $('#root-info');
 const refreshBtn = $('#refresh-btn');
 const searchInput = $('#project-search');
 const listEl = $('#project-list');
+const readonlyInput = $('#readonly-input');
 
 const STORAGE_KEY = 'ghhelper.selectedProject';
 
@@ -14,6 +15,7 @@ let selectedId = null; // currently selected project id
 let activeIdx = -1; // keyboard-highlighted item in the combo list
 let showAll = false; // when true, the combo shows every project (just focused)
 let state = null; // { project, local, remote } for the selected project
+let readOnly = true; // mirrors the server's read-only gate; starts safe (on)
 
 function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -50,6 +52,7 @@ async function loadProjects() {
   const res = await fetch('/api/projects');
   const data = await res.json();
   allProjects = data.projects || [];
+  if (typeof data.readOnly === 'boolean') setReadOnlyUI(data.readOnly);
   rootInfo.textContent = `Scanning ${data.root} · ${allProjects.length} projects (${allProjects.filter((p) => p.hasLocal).length} local)`;
 
   // Deep-link via ?p=<id> takes precedence over the last-used project.
@@ -150,10 +153,12 @@ function actionAvailability(scope, b) {
 
 function actionsCell(scope, b) {
   const a = actionAvailability(scope, b);
+  // Read-only mode greys out every action; its reason explains why.
+  const RO_REASON = 'Read-only mode is on — turn it off to enable changes';
   const btn = (act, cls, label, enabled, reason) =>
-    `<button class="row-action ${cls}" data-act="${act}" data-scope="${scope}" data-name="${esc(b.name)}" ${enabled ? '' : 'disabled'} title="${esc(reason)}">${label}</button>`;
+    `<button class="row-action ${cls}" data-act="${act}" data-scope="${scope}" data-name="${esc(b.name)}" ${enabled && !readOnly ? '' : 'disabled'} title="${esc(readOnly ? RO_REASON : reason)}">${label}</button>`;
   return (
-    btn('push', 'push', '⬆ Push', a.push, a.push ? a.pushReason : a.pushReason) +
+    btn('push', 'push', '⬆ Push', a.push, a.pushReason) +
     btn('merge', 'merge', '⛙ Merge', a.merge, a.mergeReason) +
     btn('delete', 'delete', '🗑 Delete', a.del, a.delReason)
   );
@@ -318,6 +323,39 @@ content.addEventListener('click', (e) => {
   if (row) openBranch(row.dataset.scope, row.dataset.name);
 });
 
+// ---------------------------------------------------------------------------
+// Read-only switch
+// ---------------------------------------------------------------------------
+
+// Reflect a read-only value in the UI without hitting the server.
+function setReadOnlyUI(val) {
+  readOnly = !!val;
+  readonlyInput.checked = readOnly;
+  document.body.classList.toggle('readonly', readOnly);
+}
+
+readonlyInput.addEventListener('change', async () => {
+  const want = readonlyInput.checked;
+  try {
+    const res = await fetch('/api/readonly', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ readOnly: want }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const r = await res.json();
+    setReadOnlyUI(r.readOnly);
+    showToast(r.readOnly ? 'info' : 'ok',
+      r.readOnly
+        ? 'Read-only mode ON — the dashboard will not make any changes.'
+        : 'Read-only mode OFF — push, merge, and delete are now enabled.');
+    if (selectedId) loadProject(selectedId); // re-render so buttons grey/un-grey
+  } catch (e) {
+    setReadOnlyUI(readOnly); // revert the checkbox to the last known good state
+    showToast('err', 'Could not change read-only mode: ' + e.message);
+  }
+});
+
 refreshBtn.addEventListener('click', async () => {
   refreshBtn.disabled = true;
   refreshBtn.textContent = '↻ Refreshing…';
@@ -441,6 +479,10 @@ function showToast(kind, text, sticky = false) {
 }
 
 async function runAction(act, scope, name) {
+  if (readOnly) {
+    showToast('info', 'Read-only mode is on — no changes are made. Turn it off to push, merge, or delete.');
+    return;
+  }
   const id = state.project.id;
 
   let confirmMsg = null;
@@ -472,6 +514,8 @@ async function runAction(act, scope, name) {
         r = await res.json();
       } else { showToast('info', 'Cancelled.'); return; }
     }
+
+    if (r.readOnly) { setReadOnlyUI(true); loadProject(id); } // server refused: sync the switch
 
     if (!res.ok || r.ok === false) {
       showToast('err', (r.error || 'Failed') + (r.output ? '\n' + r.output : ''), true);
