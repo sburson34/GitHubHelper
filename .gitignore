@@ -1,7 +1,8 @@
 node_modules/
 dist/
-# exe pulled in by the launcher when run inside the repo
+# exe + version marker pulled in by the launcher when run inside the repo
 /githubhelper.exe
+/.githubhelper-version
 *.log
 .DS_Store
 Thumbs.db
