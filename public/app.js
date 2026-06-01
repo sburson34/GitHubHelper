@@ -12,6 +12,7 @@ const STORAGE_KEY = 'ghhelper.selectedProject';
 let allProjects = []; // full project list for the combobox
 let selectedId = null; // currently selected project id
 let activeIdx = -1; // keyboard-highlighted item in the combo list
+let showAll = false; // when true, the combo shows every project (just focused)
 let state = null; // { project, local, remote } for the selected project
 
 function esc(s) {
@@ -60,6 +61,9 @@ async function loadProjects() {
 }
 
 function filteredProjects() {
+  // While the box just gained focus (showing the already-selected project's
+  // name), show the full list. Only filter once the user actually types.
+  if (showAll) return allProjects;
   const q = searchInput.value.trim().toLowerCase();
   if (!q) return allProjects;
   return allProjects.filter((p) => p.label.toLowerCase().includes(q) || (p.nameWithOwner || '').toLowerCase().includes(q));
@@ -95,8 +99,8 @@ function selectProject(id, fromUser = true) {
   loadProject(id);
 }
 
-searchInput.addEventListener('focus', () => { searchInput.select(); openList(); });
-searchInput.addEventListener('input', () => { activeIdx = -1; renderList(); });
+searchInput.addEventListener('focus', () => { searchInput.select(); showAll = true; openList(); });
+searchInput.addEventListener('input', () => { showAll = false; activeIdx = -1; renderList(); });
 searchInput.addEventListener('keydown', (e) => {
   const items = filteredProjects();
   if (e.key === 'ArrowDown') { e.preventDefault(); activeIdx = Math.min(activeIdx + 1, items.length - 1); renderList(); }
