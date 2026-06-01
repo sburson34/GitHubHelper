@@ -404,4 +404,4 @@ async function scanSessions() {
   return data;
 }
 
-module.exports = { scanSessions, getSettingsInfo, setApiKey, invalidate };
+module.exports = { scanSessions, getSettingsInfo, setApiKey, invalidate, getApiKey };
