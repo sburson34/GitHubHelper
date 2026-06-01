@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>GitHubHelper — project status dashboard</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="logo">⎇</span>
+        <div>
+          <h1>GitHubHelper</h1>
+          <p class="subtitle">Complete status of every code change — local &amp; GitHub</p>
+        </div>
+      </div>
+      <div class="controls">
+        <div class="combo">
+          <input id="project-search" type="text" placeholder="Search projects…" autocomplete="off" spellcheck="false" />
+          <div id="project-list" class="combo-list" hidden></div>
+        </div>
+        <button id="refresh-btn" title="Re-scan projects">↻ Refresh</button>
+      </div>
+    </header>
+
+    <main id="content">
+      <div class="placeholder">
+        <p>Search for and select a project above to see the full status of its branches.</p>
+      </div>
+    </main>
+
+    <footer class="footer">
+      <span id="root-info"></span>
+    </footer>
+
+    <script src="app.js"></script>
+  </body>
+</html>

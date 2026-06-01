@@ -1,0 +1,7 @@
+node_modules/
+*.log
+.DS_Store
+Thumbs.db
+# transient dev screenshots
+_shot*.png
+_shoterr.txt
