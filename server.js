@@ -30,7 +30,10 @@ function argValue(name) {
   return null;
 }
 
-const PORT = argValue('port') || process.env.PORT || 4317;
+// An explicitly chosen port is honored as-is; the default may auto-fall-back to
+// the next free port if it is busy (see listenWithFallback).
+const PORT_EXPLICIT = argValue('port') != null || process.env.PORT != null;
+const PORT = Number(argValue('port') || process.env.PORT || 4317);
 
 // The folder that holds your project repos. Resolution order:
 //   1. --root <dir> / PROJECTS_ROOT env
@@ -874,26 +877,70 @@ function openBrowser(url) {
   } catch { /* ignore */ }
 }
 
-const server = app.listen(PORT, async () => {
-  const url = `http://localhost:${PORT}`;
-  console.log(`\n  GitHubHelper dashboard running at  ${url}`);
-  console.log(`  Scanning local projects under      ${PROJECTS_ROOT}`);
-  const warnings = await checkTooling();
-  if (warnings.length) {
+// A double-clicked .exe closes its console the instant the process exits, so any
+// startup error would vanish before it can be read. When packaged (and attached
+// to a real console), pause so the message stays on screen until acknowledged.
+let started = false;
+function holdOpenThenExit(code) {
+  if (IS_PACKAGED && process.stdin.isTTY) {
+    process.stdout.write('  Press Enter to close this window…');
+    process.stdin.resume();
+    process.stdin.once('data', () => process.exit(code));
+  } else {
+    process.exit(code);
+  }
+}
+
+const MAX_PORT_TRIES = 10;
+
+function listenWithFallback(port, triesLeft) {
+  const server = app.listen(port);
+
+  server.on('listening', async () => {
+    started = true;
+    const actual = server.address().port;
+    const url = `http://localhost:${actual}`;
+    console.log(`\n  GitHubHelper dashboard running at  ${url}`);
+    if (actual !== PORT) console.log(`  (port ${PORT} was busy — using ${actual} instead)`);
+    console.log(`  Scanning local projects under      ${PROJECTS_ROOT}`);
+    const warnings = await checkTooling();
+    if (warnings.length) {
+      console.log('');
+      for (const w of warnings) console.log(`  ⚠ ${w}`);
+    }
     console.log('');
-    for (const w of warnings) console.log(`  ⚠ ${w}`);
+    if (IS_PACKAGED && !process.env.NO_OPEN) {
+      console.log('  Opening your browser…  (press Ctrl+C to stop the dashboard)\n');
+      openBrowser(url);
+    }
+  });
+
+  server.on('error', (e) => {
+    if (e.code === 'EADDRINUSE') {
+      // Only an explicitly requested port is treated as fatal; the default
+      // wanders to the next free port so a double-click "just works".
+      if (!PORT_EXPLICIT && triesLeft > 0) {
+        console.log(`  Port ${port} is in use — trying ${port + 1}…`);
+        return listenWithFallback(port + 1, triesLeft - 1);
+      }
+      console.error(`\n  Port ${port} is already in use. Start with a different port, e.g.:\n    githubhelper --port 5000\n`);
+      return holdOpenThenExit(1);
+    }
+    console.error(`\n  Could not start the dashboard: ${e.message}\n`);
+    holdOpenThenExit(1);
+  });
+}
+
+// Surface a crash during startup instead of letting the window flash and close.
+// Once the server is up the console is already open, so a stray async error is
+// logged without taking the running dashboard down with it.
+process.on('uncaughtException', (e) => {
+  if (started) {
+    console.error(`\n  ⚠ Unexpected error (dashboard still running): ${e.stack || e.message}\n`);
+    return;
   }
-  console.log('');
-  if (IS_PACKAGED && !process.env.NO_OPEN) {
-    console.log('  Opening your browser…  (press Ctrl+C to stop the dashboard)\n');
-    openBrowser(url);
-  }
+  console.error(`\n  Failed to start: ${e.stack || e.message}\n`);
+  holdOpenThenExit(1);
 });
 
-server.on('error', (e) => {
-  if (e.code === 'EADDRINUSE') {
-    console.error(`\n  Port ${PORT} is already in use. Start with a different port, e.g.:\n    githubhelper --port 5000\n`);
-    process.exit(1);
-  }
-  throw e;
-});
+listenWithFallback(PORT, MAX_PORT_TRIES);
