@@ -195,6 +195,7 @@ main { padding: 1.5rem; max-width: 2100px; margin: 0 auto; }
 .row-action:hover:not(:disabled) { border-color: var(--accent); }
 .row-action:disabled { opacity: 0.35; cursor: not-allowed; }
 .row-action.push { border-color: var(--orange); color: #ffd9b0; }
+.row-action.rebase { border-color: var(--accent); color: #bcd9ff; }
 .row-action.merge { border-color: var(--green); color: #b8f0c2; }
 .row-action.delete { border-color: var(--red); color: #ffc4c0; }
 
@@ -300,6 +301,7 @@ main { padding: 1.5rem; max-width: 2100px; margin: 0 auto; }
 .action-btn:hover:not(:disabled) { border-color: var(--accent); }
 .action-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 .action-btn.push { border-color: var(--orange); color: #ffd9b0; }
+.action-btn.rebase { border-color: var(--accent); color: #bcd9ff; }
 .action-btn.merge { border-color: var(--green); color: #b8f0c2; }
 .action-btn.delete { border-color: var(--red); color: #ffc4c0; }
 

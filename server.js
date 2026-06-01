@@ -887,6 +887,39 @@ app.post('/api/projects/:id/merge', denyWhenReadOnly, async (req, res) => {
   }
 });
 
+// Rebase a local branch onto the default branch (replay its commits on top of
+// the latest default). Local-only: rebasing needs a working checkout. Requires a
+// clean tree; on conflict the rebase is aborted so the repo is left clean.
+app.post('/api/projects/:id/rebase', denyWhenReadOnly, async (req, res) => {
+  try {
+    const project = await getProject(req.params.id);
+    if (!project) return res.status(404).json({ error: 'Project not found' });
+    if (!project.hasLocal) return res.status(400).json({ error: 'No local checkout — rebase runs against a local clone.' });
+    const { branch } = req.body || {};
+    if (!isSafeRef(branch)) return res.status(400).json({ error: 'Invalid branch name' });
+
+    const dir = project.path;
+    const def = await detectDefaultBranch(dir);
+    if (branch === def) return res.status(400).json({ error: 'Cannot rebase the default branch onto itself' });
+    const verify = await git(dir, 'rev-parse', '--verify', `refs/heads/${branch}`);
+    if (!verify.ok) return res.status(400).json({ error: `Local branch ${branch} not found` });
+    const status = await git(dir, 'status', '--porcelain');
+    if (status.stdout.trim()) return res.status(400).json({ error: 'Working tree is dirty — commit or stash changes before rebasing.' });
+
+    // `git rebase <upstream> <branch>` checks out <branch> and replays its
+    // unique commits on top of <upstream> (the default branch).
+    const rb = await git(dir, 'rebase', def, branch);
+    const output = (rb.stdout + '\n' + rb.stderr).trim();
+    if (!rb.ok) {
+      await git(dir, 'rebase', '--abort');
+      return res.status(409).json({ ok: false, error: 'Rebase hit conflicts — aborted, repo left clean. Resolve them manually, then retry.', output });
+    }
+    res.json({ ok: true, output: output || `Rebased ${branch} onto ${def}.`, note: `You are now on ${branch}, rebased onto the latest ${def}.` });
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
+
 // Delete a branch (local or remote).
 app.post('/api/projects/:id/delete-branch', denyWhenReadOnly, async (req, res) => {
   try {

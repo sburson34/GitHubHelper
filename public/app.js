@@ -133,6 +133,10 @@ function actionAvailability(scope, b) {
     return {
       push: !b.hasUpstream || b.ahead > 0,
       pushReason: !b.hasUpstream ? 'no upstream — push to create it' : b.ahead > 0 ? `${b.ahead} unpushed commit(s)` : 'nothing to push',
+      // A branch "needs a rebase" when the default branch has moved on since it
+      // diverged (behindDefault > 0). Rebasing replays its commits on top.
+      rebase: !b.isDefault && b.behindDefault > 0 && wtClean,
+      rebaseReason: b.isDefault ? 'this is the default branch' : b.behindDefault <= 0 ? `up to date with ${def} — no rebase needed` : !wtClean ? 'working tree is dirty' : `behind ${def} by ${b.behindDefault} — rebase onto the latest ${def}`,
       merge: !b.isDefault && b.aheadOfDefault > 0 && wtClean,
       mergeLabel: `Merge → ${def}`,
       mergeReason: b.isDefault ? 'this is the default branch' : b.aheadOfDefault <= 0 ? 'no commits ahead of default' : !wtClean ? 'working tree is dirty' : `merge into ${def} locally`,
@@ -143,6 +147,8 @@ function actionAvailability(scope, b) {
   return {
     push: false,
     pushReason: 'remote branch — already on GitHub',
+    rebase: false,
+    rebaseReason: 'rebase runs against a local checkout',
     merge: !!b.pr,
     mergeLabel: b.pr ? `Merge PR #${b.pr.number}` : 'Merge PR',
     mergeReason: b.pr ? `merge PR #${b.pr.number}` : 'no open PR for this branch',
@@ -159,6 +165,7 @@ function actionsCell(scope, b) {
     `<button class="row-action ${cls}" data-act="${act}" data-scope="${scope}" data-name="${esc(b.name)}" ${enabled && !readOnly ? '' : 'disabled'} title="${esc(readOnly ? RO_REASON : reason)}">${label}</button>`;
   return (
     btn('push', 'push', '⬆ Push', a.push, a.pushReason) +
+    btn('rebase', 'rebase', '⤴ Rebase', a.rebase, a.rebaseReason) +
     btn('merge', 'merge', '⛙ Merge', a.merge, a.mergeReason) +
     btn('delete', 'delete', '🗑 Delete', a.del, a.delReason)
   );
@@ -480,7 +487,7 @@ function showToast(kind, text, sticky = false) {
 
 async function runAction(act, scope, name) {
   if (readOnly) {
-    showToast('info', 'Read-only mode is on — no changes are made. Turn it off to push, merge, or delete.');
+    showToast('info', 'Read-only mode is on — no changes are made. Turn it off to push, rebase, merge, or delete.');
     return;
   }
   const id = state.project.id;
@@ -491,6 +498,7 @@ async function runAction(act, scope, name) {
     ? `Merge the open PR for "${name}" into ${state.remote.defaultBranch} on GitHub?`
     : `Merge "${name}" into ${state.local.defaultBranch} locally? You will end up on ${state.local.defaultBranch}.`;
   else if (act === 'push') confirmMsg = `Push "${name}" to origin?`;
+  else if (act === 'rebase') confirmMsg = `Rebase "${name}" onto ${state.local.defaultBranch}? This replays ${name}'s commits on top of the latest ${state.local.defaultBranch}; you will end up on ${name}.`;
   if (confirmMsg && !window.confirm(confirmMsg)) return;
 
   const endpoint = act === 'delete' ? 'delete-branch' : act;
