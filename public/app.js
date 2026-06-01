@@ -529,4 +529,220 @@ async function runAction(act, scope, name) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// "Working on now" tab — Claude Code sessions across all local projects
+// ---------------------------------------------------------------------------
+
+const TAB_KEY = 'ghhelper.activeTab';
+let activeTab = 'projects';
+
+// Auto-refresh state. Heuristic mode polls every 5s (no API cost). Claude mode
+// polls every 30s but only while the tab/window is focused, so it won't call
+// Claude all night. After 10 consecutive unchanged refreshes we pause until the
+// user hits Refresh (so an accidentally-left-open window stops on its own).
+const HEURISTIC_MS = 5000;
+const CLAUDE_MS = 30000;
+const IDLE_PAUSE_AFTER = 10;
+let sessionsTimer = null;
+let sessionsMode = 'heuristic';
+let sessionsLoading = false;
+let lastSig = null;
+let unchangedCount = 0;
+let autoPaused = false;
+
+function setTab(tab) {
+  activeTab = tab;
+  document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === tab));
+  $('#projects-view').hidden = tab !== 'projects';
+  $('#sessions-view').hidden = tab !== 'sessions';
+  document.body.classList.toggle('tab-sessions', tab === 'sessions');
+  localStorage.setItem(TAB_KEY, tab);
+  if (tab === 'sessions') startSessionsAuto();
+  else stopSessionsAuto();
+}
+
+document.querySelectorAll('.tab').forEach((t) => t.addEventListener('click', () => setTab(t.dataset.tab)));
+
+function stopSessionsAuto() {
+  if (sessionsTimer) { clearTimeout(sessionsTimer); sessionsTimer = null; }
+}
+
+function startSessionsAuto() {
+  autoPaused = false;
+  unchangedCount = 0;
+  loadSessions('init').finally(scheduleNext); // immediate load, then poll
+}
+
+function scheduleNext() {
+  stopSessionsAuto();
+  if (autoPaused || activeTab !== 'sessions') return;
+  const interval = sessionsMode === 'claude' ? CLAUDE_MS : HEURISTIC_MS;
+  sessionsTimer = setTimeout(sessionsTick, interval);
+}
+
+function sessionsTick() {
+  // In Claude mode, skip the fetch when the window isn't focused — re-check on
+  // the next tick instead of spending a Claude call on an unattended window.
+  if (sessionsMode === 'claude' && !document.hasFocus()) { scheduleNext(); return; }
+  loadSessions('auto').finally(scheduleNext);
+}
+
+function sessionSignature(list) {
+  return JSON.stringify((list || []).map((s) => [s.sessionId, s.finishedAt, s.status, s.about, s.lastCommand]));
+}
+
+async function loadSessions(reason) {
+  if (sessionsLoading) return;
+  sessionsLoading = true;
+  try {
+    const res = await fetch('/api/sessions');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    sessionsMode = data.summarySource === 'claude' ? 'claude' : 'heuristic';
+    renderSessions(data);
+
+    const sig = sessionSignature(data.sessions);
+    if (reason === 'auto') {
+      if (sig === lastSig) {
+        if (++unchangedCount >= IDLE_PAUSE_AFTER) { autoPaused = true; stopSessionsAuto(); }
+      } else {
+        unchangedCount = 0;
+      }
+    } else {
+      unchangedCount = 0; // manual/init always resets the idle counter
+      autoPaused = false;
+    }
+    lastSig = sig;
+    updateSessionsStatus(data);
+  } catch (e) {
+    $('#sessions-content').innerHTML = `<div class="error">Failed to load sessions: ${esc(e.message)}</div>`;
+  } finally {
+    sessionsLoading = false;
+  }
+}
+
+function updateSessionsStatus(data) {
+  const n = (data.sessions || []).length;
+  const el = $('#sessions-status');
+  if (autoPaused) {
+    el.innerHTML = `<span class="dot paused"></span>Auto-refresh paused — nothing changed for a while. Hit <strong>Refresh</strong> to resume. <span class="muted">· ${n} session(s)</span>`;
+    return;
+  }
+  const mode = sessionsMode === 'claude'
+    ? 'AI summaries on · refreshing every 30s while focused'
+    : 'heuristic summaries · refreshing every 5s';
+  el.innerHTML = `<span class="dot live"></span>${mode} <span class="muted">· ${n} session(s)</span>`;
+}
+
+function sessionHead() {
+  return `<thead><tr>
+    <th>Project</th><th>What I’m working on</th><th>Last command</th><th>Status</th><th>Finished</th>
+  </tr></thead>`;
+}
+
+function sessionRow(s) {
+  const running = s.status === 'running';
+  const statusBadge = running
+    ? '<span class="badge s-running">● running</span>'
+    : '<span class="badge s-done">✓ done</span>';
+  const finished = running ? '<span class="s-active">active now</span>' : timeAgo(s.finishedAt);
+  const aiSub = s.aiTitle && s.aiTitle !== s.about ? `<div class="about-sub">${esc(s.aiTitle)}</div>` : '';
+  return `
+    <tr class="${running ? 'lvl-ok' : 'lvl-info'}">
+      <td class="col-proj" title="${esc(s.projectPath)}">${esc(s.project)}</td>
+      <td class="col-about">${esc(s.about || '—')}${aiSub}</td>
+      <td class="col-lastcmd">${esc(s.lastCommand || '')}</td>
+      <td class="col-status">${statusBadge}</td>
+      <td class="col-finished">${finished}</td>
+    </tr>`;
+}
+
+function renderSessions(data) {
+  const list = data.sessions || [];
+  const el = $('#sessions-content');
+  if (!list.length) {
+    el.innerHTML = '<div class="empty">No sessions you have typed into in the last 14 days.</div>';
+    return;
+  }
+  el.innerHTML = `<table class="branch-table session-table">${sessionHead()}<tbody>${list.map(sessionRow).join('')}</tbody></table>`;
+}
+
+// Manual refresh: bust the server-side caches, reset the idle counter, reload.
+$('#sessions-refresh').addEventListener('click', async () => {
+  autoPaused = false;
+  unchangedCount = 0;
+  await fetch('/api/refresh', { method: 'POST' }).catch(() => {});
+  loadSessions('manual').finally(scheduleNext);
+});
+
+// ---------------------------------------------------------------------------
+// Settings: optional Anthropic API key for AI-written summaries
+// ---------------------------------------------------------------------------
+
+const settingsPanel = $('#settings-panel');
+const apiKeyInput = $('#api-key-input');
+const settingsNote = $('#settings-note');
+
+$('#settings-btn').addEventListener('click', () => {
+  settingsPanel.hidden = !settingsPanel.hidden;
+  if (!settingsPanel.hidden) loadSettings();
+});
+
+async function loadSettings() {
+  try {
+    const s = await (await fetch('/api/settings')).json();
+    renderSettingsNote(s);
+  } catch { /* ignore */ }
+}
+
+function renderSettingsNote(s) {
+  if (s.hasApiKey) {
+    settingsNote.textContent = s.source === 'env'
+      ? 'A key is set via the ANTHROPIC_API_KEY environment variable — AI summaries are on.'
+      : 'A key is saved — AI summaries are on.';
+    apiKeyInput.placeholder = '•••••• key saved — type to replace';
+  } else {
+    settingsNote.textContent = 'No key set — using the built-in heuristic (free, refreshes every 5s).';
+    apiKeyInput.placeholder = 'sk-ant-…';
+  }
+}
+
+async function saveApiKey(value, okMsg) {
+  try {
+    const res = await fetch('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ anthropicApiKey: value }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const s = await res.json();
+    apiKeyInput.value = '';
+    renderSettingsNote(s);
+    showToast(s.hasApiKey ? 'ok' : 'info', okMsg);
+    autoPaused = false;
+    unchangedCount = 0;
+    await fetch('/api/refresh', { method: 'POST' }).catch(() => {});
+    loadSessions('manual').finally(scheduleNext);
+  } catch (e) {
+    showToast('err', 'Could not update the API key: ' + e.message);
+  }
+}
+
+$('#api-key-save').addEventListener('click', () => {
+  const v = apiKeyInput.value.trim();
+  if (!v) { showToast('info', 'Enter a key first, or use Clear to remove the saved one.'); return; }
+  saveApiKey(v, 'API key saved — summaries will now use Claude.');
+});
+$('#api-key-clear').addEventListener('click', () => saveApiKey('', 'API key cleared — using the heuristic.'));
+
+// ---------------------------------------------------------------------------
+// Boot
+// ---------------------------------------------------------------------------
+
 loadProjects();
+
+const initialTab = new URLSearchParams(location.search).get('tab')
+  || (location.hash === '#sessions' ? 'sessions' : null)
+  || localStorage.getItem(TAB_KEY)
+  || 'projects';
+setTab(initialTab === 'sessions' ? 'sessions' : 'projects');

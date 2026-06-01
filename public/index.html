@@ -29,13 +29,44 @@
       </div>
     </header>
 
+    <nav class="tabs" role="tablist">
+      <button class="tab active" data-tab="projects" role="tab">Projects</button>
+      <button class="tab" data-tab="sessions" role="tab">⚡ Working on now</button>
+    </nav>
+
     <div class="readonly-banner" role="status">
       <span>🔒 Read-only mode is on — the dashboard is only reading and reporting. No changes are made to git or GitHub. Toggle “Read-only” off to enable push, merge, and delete.</span>
     </div>
 
-    <main id="content">
-      <div class="placeholder">
-        <p>Search for and select a project above to see the full status of its branches.</p>
+    <main>
+      <div id="projects-view" class="view">
+        <div id="content">
+          <div class="placeholder">
+            <p>Search for and select a project above to see the full status of its branches.</p>
+          </div>
+        </div>
+      </div>
+
+      <div id="sessions-view" class="view" hidden>
+        <div class="sessions-bar">
+          <div class="sessions-status" id="sessions-status"></div>
+          <div class="sessions-actions">
+            <button id="sessions-refresh" title="Refresh now">↻ Refresh</button>
+            <button id="settings-btn" title="Set an Anthropic API key to get AI-written summaries">⚙ Settings</button>
+          </div>
+        </div>
+        <div id="settings-panel" class="settings-panel" hidden>
+          <label for="api-key-input">Anthropic API key — enables AI-written “what I’m working on” summaries. Leave empty to use the built-in heuristic.</label>
+          <div class="settings-row">
+            <input type="password" id="api-key-input" placeholder="sk-ant-…" autocomplete="off" spellcheck="false" />
+            <button id="api-key-save">Save</button>
+            <button id="api-key-clear">Clear</button>
+          </div>
+          <div class="settings-note" id="settings-note"></div>
+        </div>
+        <div id="sessions-content">
+          <div class="placeholder"><p>Scanning your Claude Code sessions…</p></div>
+        </div>
       </div>
     </main>
 

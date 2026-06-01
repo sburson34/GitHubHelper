@@ -98,7 +98,7 @@ button:hover { background: #262d3a; border-color: var(--accent); }
 body.readonly .readonly-banner { display: flex; }
 
 /* Layout --------------------------------------------------------------- */
-main { padding: 1.5rem; max-width: 1200px; margin: 0 auto; }
+main { padding: 1.5rem; max-width: 2100px; margin: 0 auto; }
 .placeholder { color: var(--text-dim); text-align: center; padding: 4rem 1rem; }
 
 .proj-header {
@@ -335,3 +335,64 @@ main { padding: 1.5rem; max-width: 1200px; margin: 0 auto; }
 .diff .ctx { color: var(--text-dim); display: block; }
 .diff .more { color: var(--yellow); display: block; margin-top: 0.3rem; }
 .file .omitted { padding: 0.5rem 0.75rem; color: var(--text-dim); font-size: 0.8rem; }
+
+/* Tabs ----------------------------------------------------------------- */
+.tabs {
+  display: flex; gap: 0.25rem;
+  padding: 0 1.5rem; background: var(--bg-alt);
+  border-bottom: 1px solid var(--border);
+}
+.tab {
+  font: inherit; font-size: 0.9rem; font-weight: 600;
+  background: transparent; border: none; border-bottom: 2px solid transparent;
+  color: var(--text-dim); padding: 0.7rem 1rem; cursor: pointer; border-radius: 0;
+}
+.tab:hover { background: transparent; color: var(--text); border-color: var(--border); }
+.tab.active { color: var(--text); border-bottom-color: var(--accent); }
+
+/* On the sessions tab the project-only controls (search + read-only) are
+   irrelevant, so hide the whole control cluster; the sessions view has its own
+   toolbar with Refresh + Settings. */
+body.tab-sessions .controls { display: none; }
+
+.view { width: 100%; }
+
+/* Sessions toolbar ----------------------------------------------------- */
+.sessions-bar {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 1rem; flex-wrap: wrap; margin-bottom: 1rem;
+}
+.sessions-status { font-size: 0.85rem; color: var(--text-dim); display: flex; align-items: center; gap: 0.5rem; }
+.sessions-status .muted { color: var(--text-dim); opacity: 0.8; }
+.sessions-status .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--text-dim); }
+.sessions-status .dot.live { background: var(--green); box-shadow: 0 0 0 3px rgba(63,185,80,0.18); }
+.sessions-status .dot.paused { background: var(--yellow); }
+.sessions-actions { display: flex; gap: 0.5rem; }
+
+/* Settings panel ------------------------------------------------------- */
+.settings-panel {
+  margin-bottom: 1.25rem; padding: 0.9rem 1.1rem;
+  border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-card);
+}
+.settings-panel label { display: block; font-size: 0.82rem; color: var(--text-dim); margin-bottom: 0.6rem; }
+.settings-row { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+.settings-row input {
+  flex: 1; min-width: 240px; font: inherit;
+  background: var(--bg); color: var(--text);
+  border: 1px solid var(--border); border-radius: 8px; padding: 0.5rem 0.75rem;
+}
+.settings-note { margin-top: 0.6rem; font-size: 0.8rem; color: var(--text-dim); }
+
+/* Sessions grid (reuses .branch-table) --------------------------------- */
+.session-table .col-proj { font-weight: 600; white-space: nowrap; }
+.session-table .col-about { max-width: 360px; }
+.session-table .col-about .about-sub { color: var(--text-dim); font-size: 0.76rem; margin-top: 0.2rem; }
+.session-table .col-lastcmd {
+  color: var(--text-dim); max-width: 300px;
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 0.78rem;
+}
+.session-table .col-status { white-space: nowrap; }
+.session-table .col-finished { white-space: nowrap; color: var(--text-dim); }
+.session-table .s-active { color: var(--green); font-weight: 600; }
+.badge.s-running { color: var(--green); border-color: var(--green); }
+.badge.s-done { color: var(--text-dim); }

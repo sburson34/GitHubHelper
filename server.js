@@ -12,6 +12,7 @@ const express = require('express');
 const path = require('path');
 const fs = require('fs');
 const { execFile, spawn } = require('child_process');
+const sessions = require('./sessions');
 
 // Detect whether we are running as a packaged single-executable (.exe).
 let IS_PACKAGED = false;
@@ -930,7 +931,30 @@ app.post('/api/projects/:id/delete-branch', denyWhenReadOnly, async (req, res) =
 
 app.post('/api/refresh', (req, res) => {
   projectCache = { ts: 0, data: null };
+  sessions.invalidate();
   res.json({ ok: true });
+});
+
+// "Working on now" — every local Claude Code session you have typed into in the
+// last 14 days, summarized and ordered most-recent-first. Pure local read.
+app.get('/api/sessions', async (req, res) => {
+  try {
+    res.json(await sessions.scanSessions());
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+// Settings for the optional Anthropic API key that upgrades session summaries
+// from the local heuristic to a Claude-written one. GET never returns the key
+// itself — only whether one is set and where it came from. POST writes it to a
+// local config file (not a git/GitHub change, so it is exempt from read-only).
+app.get('/api/settings', (req, res) => res.json(sessions.getSettingsInfo()));
+app.post('/api/settings', (req, res) => {
+  const { anthropicApiKey } = req.body || {};
+  if (anthropicApiKey != null && typeof anthropicApiKey !== 'string')
+    return res.status(400).json({ error: 'Body must be { "anthropicApiKey": "<key>" | "" }' });
+  res.json(sessions.setApiKey(anthropicApiKey));
 });
 
 // Read-only switch. GET reports the current state; POST { readOnly: bool } sets it.
