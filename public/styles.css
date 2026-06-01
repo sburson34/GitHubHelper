@@ -133,7 +133,8 @@ main { padding: 1.5rem; max-width: 1200px; margin: 0 auto; }
 .branch-table tbody tr.lvl-ok { border-left-color: var(--green); }
 .branch-table tbody tr.lvl-info { border-left-color: var(--accent); }
 .branch-table tbody tr.lvl-cleanup { border-left-color: var(--purple); }
-.branch-table tbody tr:hover { background: rgba(255,255,255,0.02); }
+.branch-table tbody tr[data-scope] { cursor: pointer; }
+.branch-table tbody tr:hover { background: rgba(255,255,255,0.04); }
 
 .branch-link {
   font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;

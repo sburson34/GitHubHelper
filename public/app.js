@@ -195,8 +195,8 @@ function commitCell(c) {
 function branchRow(scope, b, badgesHtml) {
   const lvl = b.recommendation ? b.recommendation.level : 'info';
   return `
-    <tr class="lvl-${lvl}">
-      <td><a class="branch-link" data-scope="${scope}" data-name="${esc(b.name)}">${esc(b.name)}</a></td>
+    <tr class="lvl-${lvl}" data-scope="${scope}" data-name="${esc(b.name)}">
+      <td><a class="branch-link">${esc(b.name)}</a></td>
       <td class="col-state">${badgesHtml || ''}</td>
       <td class="col-change">${esc(b.description)}</td>
       <td class="col-commit">${commitCell(b.lastCommit)}</td>
@@ -310,10 +310,12 @@ async function loadProject(id) {
 // ---------------------------------------------------------------------------
 
 content.addEventListener('click', (e) => {
-  const link = e.target.closest('.branch-link');
-  if (link) { openBranch(link.dataset.scope, link.dataset.name); return; }
+  // A click on an action button (enabled or not) never opens the detail view.
   const act = e.target.closest('.row-action');
-  if (act && !act.disabled) runAction(act.dataset.act, act.dataset.scope, act.dataset.name);
+  if (act) { if (!act.disabled) runAction(act.dataset.act, act.dataset.scope, act.dataset.name); return; }
+  // Anywhere else on a branch row opens that branch's details.
+  const row = e.target.closest('tr[data-scope]');
+  if (row) openBranch(row.dataset.scope, row.dataset.name);
 });
 
 refreshBtn.addEventListener('click', async () => {
