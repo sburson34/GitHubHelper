@@ -9,15 +9,26 @@ Pick a project and you get, per branch: a plain-language summary of the change, 
 - **One searchable picker** for every project — local checkouts and your GitHub repos, merged into a single list.
 - **Per-branch table** with columns for state (badges), change summary, last commit, recommendation, and actions.
 - **Click any row** to open a detail view: files changed, per-file diffs, and the commits unique to that branch. For a branch with an open PR, it shows the PR's own diff.
+- **CI, review & conflict status** surfaced inline: each PR shows a CI rollup (✓ / ✗ / ● running), its review decision (approved / changes requested), and whether it has merge conflicts. Local branches are dry-run-merged against the default branch so a *"conflicts default"* badge warns before you try. All of it feeds the recommendation (e.g. *"CI failing — fix before merging"*, *"approved & CI green — merge it"*).
 - **Inline actions**, gated by the recommendation so you only see what's safe:
   - **Push** a local branch that has unpushed commits.
+  - **Pull** (fast-forward only) a local branch that's behind origin.
+  - **Open PR** for a branch with no PR yet — pushes first if needed, then runs `gh pr create --fill`.
+  - **Checkout** a branch or PR in the local clone to run it (`git checkout` / `gh pr checkout`, fetching first if needed).
+  - **Rebase** a local branch onto the latest default branch.
   - **Merge** a local branch into the default branch, or merge a branch's open PR on GitHub.
   - **Delete** a merged / stale branch (local or remote).
-- **Recommendations** like *"Push 1 unpushed commit, then open a PR"*, *"Merged into main — safe to delete"*, *"PR #78 open — get it reviewed & merged"*.
-- **Read-only mode** (a header toggle, **on by default**): while on, the dashboard only reads and reports — every push / merge / delete is refused, both in the UI and at the server. It's a one-way gate (git/GitHub → dashboard, never the reverse) and resets to on at every restart.
+- **AI conflict resolution** (optional): when a local **merge** or **rebase** hits conflicts and an Anthropic API key is set, Claude resolves the conflicted files automatically and reports a per-file summary of what it did. It only bails — aborting the operation and leaving the repo clean — when it genuinely can't decide (or a file is binary / too large / a rename-delete conflict). The result is a local commit you can review and undo.
+- **Bring repos in and out of GitHub**: **Clone** a GitHub-only repo into your projects folder, or **Publish** a local-only repo to a new GitHub repo (private or public) in one click.
+- **Act on pull requests** right from the Open PRs list: **approve / request changes / comment** (`gh pr review`), **mark ready / convert to draft**, and **re-run failed CI jobs** (`gh run rerun --failed`).
+- **Per-project toolbar**: **Fetch** (`--all --prune`, refreshes ahead/behind counts) plus one-click **open in Folder / Terminal / Editor** (VS Code, WebStorm, IDEA or Sublime, whichever is on PATH). The open project is also **auto-fetched every 10 minutes** (while focused) so its ahead/behind stays live.
+- **"Across all projects" overview**: one scan rolls up everything needing attention across every repo — uncommitted/unpushed work, stale branches, parked stashes, your open PRs, and PRs awaiting your review — sorted by urgency, each row click-through to the project.
+- **Desktop notifications** (opt-in 🔔 toggle): get alerted when a pull request is waiting on your review.
+- **Recommendations** like *"Push 1 unpushed commit, then open a PR"*, *"Merged into main — safe to delete"*, *"PR #78 approved & CI green — merge it"*.
+- **Read-only mode** (a header toggle, **on by default**): while on, the dashboard only reads and reports — every push / pull / merge / delete / open-PR / clone / publish / PR-review / checkout is refused, both in the UI and at the server. It's a one-way gate (git/GitHub → dashboard, never the reverse) and resets to on at every restart. (Fetch, and opening a folder/terminal/editor, don't change anything you work on — fetch only updates remote-tracking refs — so they stay available even in read-only.)
 - **"Working on now" tab**: scans your local Claude Code session transcripts (`~/.claude/projects`) and shows what each session is about, its last command, whether it's still running or done, and how recently it finished — a quick view of what you have in flight.
 
-The **branch-status analysis is rule-based** — no AI, no API key. The only optional AI is in the "Working on now" tab: if you provide an Anthropic API key it writes nicer session summaries via the Claude API; without one it falls back to a built-in heuristic.
+The **branch-status analysis is rule-based** — no AI, no API key. AI is optional and used in two places when you provide an Anthropic API key: nicer session summaries in the "Working on now" tab (heuristic fallback without a key), and automatic merge/rebase **conflict resolution** (without a key, conflicts just abort cleanly as before).
 
 ## Requirements
 

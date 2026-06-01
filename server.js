@@ -13,6 +13,7 @@ const path = require('path');
 const fs = require('fs');
 const { execFile, spawn } = require('child_process');
 const sessions = require('./sessions');
+const resolve = require('./resolve');
 
 // Detect whether we are running as a packaged single-executable (.exe).
 let IS_PACKAGED = false;
@@ -93,11 +94,20 @@ function isMutatingCommand(cmd, args) {
   const a = args.map(String);
   if (cmd === 'git') {
     const sub = a[0] === '-C' ? a[2] : a[0];
+    // `fetch` is deliberately NOT here: it only updates remote-tracking refs
+    // (GitHub → your local refs) and never changes a branch you work on, so it
+    // is one-way-safe and stays allowed even in read-only mode. `pull` (fetch +
+    // merge into your checkout) does change your work, so it remains a write.
     const WRITE = new Set([
-      'push', 'merge', 'commit', 'rebase', 'reset', 'pull', 'fetch', 'clone',
+      'push', 'merge', 'commit', 'rebase', 'reset', 'pull', 'clone',
       'checkout', 'switch', 'cherry-pick', 'revert', 'am', 'apply', 'clean',
-      'stash', 'gc', 'prune', 'update-ref', 'mv', 'rm', 'add', 'restore', 'notes',
+      'gc', 'prune', 'update-ref', 'mv', 'rm', 'add', 'restore', 'notes',
     ]);
+    if (sub === 'stash') {
+      // list/show read; push/pop/apply/drop/clear/create/store (and bare `stash`) write.
+      const rest = a[0] === '-C' ? a.slice(3) : a.slice(1);
+      return !['list', 'show'].includes(rest[0]);
+    }
     if (WRITE.has(sub)) return true;
     if (sub === 'branch')
       return a.some((x) => ['-d', '-D', '--delete', '-m', '-M', '--move', '-c', '-C', '--copy', '-u', '--set-upstream-to', '--unset-upstream', '--edit-description'].includes(x));
@@ -404,12 +414,14 @@ async function localStatus(dir) {
   // Working tree state.
   const statusRes = await git(dir, 'status', '--porcelain');
   const dirtyLines = statusRes.stdout.split('\n').map((l) => l.replace(/\r$/, '')).filter(Boolean);
+  const stashRes = await git(dir, 'stash', 'list');
   const workingTree = {
     clean: dirtyLines.length === 0,
     count: dirtyLines.length,
     staged: dirtyLines.filter((l) => l[0] !== ' ' && l[0] !== '?').length,
     unstaged: dirtyLines.filter((l) => l[1] !== ' ' && l[1] !== '?').length,
     untracked: dirtyLines.filter((l) => l.startsWith('??')).length,
+    stashCount: stashRes.stdout.split('\n').filter(Boolean).length,
     files: dirtyLines.slice(0, 50).map((l) => ({ status: l.slice(0, 2).trim(), file: l.slice(3) })),
   };
 
@@ -444,11 +456,17 @@ async function localStatus(dir) {
     // Description of the change vs default.
     let commitSubjects = [];
     let stat = null;
+    let conflictsWithDefault = null; // true/false once known; null = not checked / unknown
     if (!isDefault && aheadOfDefault > 0) {
       const logRes = await git(dir, 'log', `${defaultBranch}..${name}`, '--format=%s', '-n', '20');
       commitSubjects = logRes.stdout.split('\n').map((s) => s.trim()).filter(Boolean);
       const statRes = await git(dir, 'diff', '--shortstat', `${defaultBranch}...${name}`);
       stat = parseShortstat(statRes.stdout);
+      // Dry-run the merge into default without touching the working tree.
+      // Exit 0 = clean, 1 = conflicts; anything else (e.g. old git) = unknown.
+      const mt = await git(dir, 'merge-tree', '--write-tree', '--name-only', defaultBranch, name);
+      if (mt.code === 0) conflictsWithDefault = false;
+      else if (mt.code === 1) conflictsWithDefault = true;
     }
 
     const b = {
@@ -463,6 +481,7 @@ async function localStatus(dir) {
       merged: mergedSet.has(name) && !isDefault,
       aheadOfDefault,
       behindDefault,
+      conflictsWithDefault,
       lastCommit: { sha, date, author, subject },
       description: isDefault ? 'Default branch.' : describeChange(commitSubjects, stat),
       stat,
@@ -495,15 +514,52 @@ async function localStatus(dir) {
 // Remote (GitHub) status
 // ---------------------------------------------------------------------------
 
+// Collapse a PR's statusCheckRollup (a mix of GitHub Actions CheckRuns and
+// legacy StatusContexts) into one overall CI state.
+function rollupChecks(rollup) {
+  if (!Array.isArray(rollup) || rollup.length === 0)
+    return { state: 'none', total: 0, failing: 0, pending: 0, passing: 0 };
+  let failing = 0, pending = 0, passing = 0;
+  for (const c of rollup) {
+    if (c.status || c.conclusion) {
+      // CheckRun: status QUEUED|IN_PROGRESS|COMPLETED, conclusion SUCCESS|FAILURE|…
+      const status = String(c.status || '').toUpperCase();
+      const concl = String(c.conclusion || '').toUpperCase();
+      if (status && status !== 'COMPLETED') pending++;
+      else if (['FAILURE', 'TIMED_OUT', 'CANCELLED', 'ACTION_REQUIRED', 'STARTUP_FAILURE'].includes(concl)) failing++;
+      else if (['SUCCESS', 'NEUTRAL', 'SKIPPED'].includes(concl)) passing++;
+      else pending++;
+    } else {
+      // StatusContext: state SUCCESS|FAILURE|ERROR|PENDING|EXPECTED
+      const state = String(c.state || '').toUpperCase();
+      if (['FAILURE', 'ERROR'].includes(state)) failing++;
+      else if (state === 'SUCCESS') passing++;
+      else pending++;
+    }
+  }
+  const state = failing > 0 ? 'failure' : pending > 0 ? 'pending' : passing > 0 ? 'success' : 'none';
+  return { state, total: rollup.length, failing, pending, passing };
+}
+
 function recommendRemoteBranch(b, pr, defaultBranch) {
   if (b.name === defaultBranch) return { level: 'ok', text: 'Default branch on GitHub.' };
   if (pr) {
+    const checks = b.checks;
     if (pr.isDraft) return { level: 'info', text: `Draft PR #${pr.number} open — mark ready when finished.` };
-    if (pr.reviewDecision === 'APPROVED')
-      return { level: 'action', text: `PR #${pr.number} is approved — merge it.` };
+    if (checks && checks.state === 'failure')
+      return { level: 'action', text: `PR #${pr.number} — CI failing (${checks.failing} of ${checks.total} check(s)); fix before merging.` };
     if (pr.reviewDecision === 'CHANGES_REQUESTED')
       return { level: 'action', text: `PR #${pr.number} has changes requested — address review feedback.` };
-    return { level: 'action', text: `PR #${pr.number} open${pr.aheadBy ? '' : ''} — get it reviewed & merged.` };
+    if (b.mergeable === 'CONFLICTING')
+      return { level: 'action', text: `PR #${pr.number} has merge conflicts — resolve them before it can be merged.` };
+    if (pr.reviewDecision === 'APPROVED') {
+      if (checks && checks.state === 'pending')
+        return { level: 'info', text: `PR #${pr.number} approved — waiting on CI to finish.` };
+      return { level: 'action', text: `PR #${pr.number} is approved${checks && checks.state === 'success' ? ' & CI is green' : ''} — merge it.` };
+    }
+    if (checks && checks.state === 'pending')
+      return { level: 'info', text: `PR #${pr.number} open — CI running; get it reviewed.` };
+    return { level: 'action', text: `PR #${pr.number} open — get it reviewed & merged.` };
   }
   if (b.aheadBy > 0)
     return { level: 'action', text: `${b.aheadBy} commit(s) ahead of ${defaultBranch} with no PR — open one.` };
@@ -533,7 +589,7 @@ async function remoteStatus(owner, repo) {
       '--limit',
       '100',
       '--json',
-      'number,title,headRefName,baseRefName,url,isDraft,reviewDecision,createdAt,additions,deletions,changedFiles,mergeable',
+      'number,title,headRefName,baseRefName,url,isDraft,reviewDecision,createdAt,additions,deletions,changedFiles,mergeable,statusCheckRollup',
     ])) || [];
   const prByHead = new Map(prs.map((p) => [p.headRefName, p]));
 
@@ -579,6 +635,7 @@ async function remoteStatus(owner, repo) {
     }
 
     const pr = prByHead.get(name) || null;
+    const checks = pr ? rollupChecks(pr.statusCheckRollup) : null;
     const b = {
       name,
       isDefault,
@@ -586,6 +643,8 @@ async function remoteStatus(owner, repo) {
       aheadBy,
       behindBy,
       lastCommit,
+      checks,
+      mergeable: pr ? pr.mergeable : null,
       pr: pr
         ? {
             number: pr.number,
@@ -594,6 +653,8 @@ async function remoteStatus(owner, repo) {
             isDraft: pr.isDraft,
             reviewDecision: pr.reviewDecision,
             base: pr.baseRefName,
+            checks,
+            mergeable: pr.mergeable,
           }
         : null,
       description: isDefault ? 'Default branch.' : describeChange(subjects, stat),
@@ -626,6 +687,8 @@ async function remoteStatus(owner, repo) {
       additions: p.additions,
       deletions: p.deletions,
       changedFiles: p.changedFiles,
+      mergeable: p.mergeable,
+      checks: rollupChecks(p.statusCheckRollup),
     })),
     branches,
   };
@@ -642,6 +705,15 @@ const RS = String.fromCharCode(30); // record separator
 // names allow letters, digits, and ._/- ; we forbid a leading dash.
 function isSafeRef(name) {
   return typeof name === 'string' && name.length > 0 && name.length < 256 && !name.startsWith('-') && /^[A-Za-z0-9._/-]+$/.test(name);
+}
+
+// A safe single path segment / repo name (no slashes, no traversal).
+function isSafeName(name) {
+  return typeof name === 'string' && name.length > 0 && name.length < 256 && name !== '.' && name !== '..' && /^[A-Za-z0-9._-]+$/.test(name);
+}
+
+function isPrNumber(n) {
+  return Number.isInteger(n) && n > 0 && n < 10000000;
 }
 
 const PATCH_CAP = 800; // max patch lines returned per file
@@ -878,8 +950,38 @@ app.post('/api/projects/:id/merge', denyWhenReadOnly, async (req, res) => {
     const mg = await git(dir, 'merge', '--no-edit', branch);
     const output = (mg.stdout + '\n' + mg.stderr).trim();
     if (!mg.ok) {
-      await git(dir, 'merge', '--abort');
-      return res.status(409).json({ ok: false, error: 'Merge conflict — aborted, repo left clean.', output });
+      const g = (...a) => git(dir, ...a);
+      const conflicted = (await g('diff', '--name-only', '--diff-filter=U')).stdout.trim();
+
+      // Conflicts + an API key → let Claude resolve them, then finish the merge.
+      if (conflicted && resolve.hasApiKey()) {
+        const r = await resolve.resolveCurrentConflicts({ dir, git: g, ours: def, theirs: branch, operation: 'merge' });
+        if (!r.ok) {
+          await g('merge', '--abort');
+          return res.status(409).json({ ok: false, bail: true, error: `Couldn't auto-resolve the conflict (${r.reason})${r.file ? ` in ${r.file}` : ''}. Merge aborted, repo left clean — resolve it by hand.`, output });
+        }
+        const commit = await g('commit', '--no-edit');
+        if (!commit.ok) {
+          await g('merge', '--abort');
+          return res.status(500).json({ ok: false, error: 'Resolved the conflicts but could not finish the merge commit — aborted, repo left clean.', output: (commit.stdout + '\n' + commit.stderr).trim() });
+        }
+        return res.json({
+          ok: true,
+          resolved: true,
+          output: `Merged ${branch} into ${def} — Claude auto-resolved ${r.files.length} conflicted file(s).`,
+          summary: r.files.map((f) => `• ${f.file}: ${f.explanation}`).join('\n'),
+          note: `You are now on ${def}. Review the resolution, then push to publish. To undo: git reset --hard HEAD~1.`,
+        });
+      }
+
+      await g('merge', '--abort');
+      return res.status(409).json({
+        ok: false,
+        error: conflicted
+          ? 'Merge conflict — aborted, repo left clean. Set an Anthropic API key (Working on now ▸ Settings) to let Claude resolve conflicts automatically.'
+          : 'Merge failed — aborted, repo left clean.',
+        output,
+      });
     }
     res.json({ ok: true, output: output || `Merged ${branch} into ${def}.`, note: `You are now on ${def}; push to publish.` });
   } catch (e) {
@@ -909,12 +1011,160 @@ app.post('/api/projects/:id/rebase', denyWhenReadOnly, async (req, res) => {
     // `git rebase <upstream> <branch>` checks out <branch> and replays its
     // unique commits on top of <upstream> (the default branch).
     const rb = await git(dir, 'rebase', def, branch);
-    const output = (rb.stdout + '\n' + rb.stderr).trim();
+    let output = (rb.stdout + '\n' + rb.stderr).trim();
     if (!rb.ok) {
-      await git(dir, 'rebase', '--abort');
-      return res.status(409).json({ ok: false, error: 'Rebase hit conflicts — aborted, repo left clean. Resolve them manually, then retry.', output });
+      const g = (...a) => git(dir, ...a);
+      const conflicted = (await g('diff', '--name-only', '--diff-filter=U')).stdout.trim();
+
+      if (!(conflicted && resolve.hasApiKey())) {
+        await g('rebase', '--abort');
+        return res.status(409).json({
+          ok: false,
+          error: conflicted
+            ? 'Rebase hit conflicts — aborted, repo left clean. Set an Anthropic API key (Working on now ▸ Settings) to let Claude resolve them automatically.'
+            : 'Rebase hit conflicts — aborted, repo left clean. Resolve them manually, then retry.',
+          output,
+        });
+      }
+
+      // Rebase replays commits one at a time, so each replayed commit can raise a
+      // fresh conflict: resolve → continue → repeat until it finishes or bails.
+      const allResolved = [];
+      let guard = 0;
+      while (true) {
+        if (++guard > 50) {
+          await g('rebase', '--abort');
+          return res.status(409).json({ ok: false, error: 'Rebase needed too many resolution rounds — aborted, repo left clean.', output });
+        }
+        const r = await resolve.resolveCurrentConflicts({ dir, git: g, ours: def, theirs: branch, operation: 'rebase' });
+        if (!r.ok) {
+          await g('rebase', '--abort');
+          return res.status(409).json({ ok: false, bail: true, error: `Couldn't auto-resolve the rebase conflict (${r.reason})${r.file ? ` in ${r.file}` : ''}. Rebase aborted, repo left clean — resolve it by hand.`, output });
+        }
+        allResolved.push(...r.files);
+        // GIT_EDITOR=true keeps `--continue` from opening an editor for the message.
+        const cont = await run('git', ['-C', dir, 'rebase', '--continue'], { env: { ...process.env, GIT_EDITOR: 'true', GIT_SEQUENCE_EDITOR: 'true' } });
+        output = (cont.stdout + '\n' + cont.stderr).trim();
+        if (cont.ok) break; // rebase finished
+        const still = (await g('diff', '--name-only', '--diff-filter=U')).stdout.trim();
+        if (!still) {
+          await g('rebase', '--abort');
+          return res.status(500).json({ ok: false, error: 'Rebase could not continue after resolving — aborted, repo left clean.', output });
+        }
+        // else: the next replayed commit conflicts too → loop and resolve again
+      }
+
+      const seen = new Set();
+      const uniq = allResolved.filter((f) => (seen.has(f.file) ? false : seen.add(f.file)));
+      return res.json({
+        ok: true,
+        resolved: true,
+        output: `Rebased ${branch} onto ${def} — Claude auto-resolved conflicts in ${uniq.length} file(s).`,
+        summary: uniq.map((f) => `• ${f.file}: ${f.explanation}`).join('\n'),
+        note: `You are now on ${branch}, rebased onto the latest ${def}. Review the resolution before pushing (a rebased branch needs a force-push).`,
+      });
     }
     res.json({ ok: true, output: output || `Rebased ${branch} onto ${def}.`, note: `You are now on ${branch}, rebased onto the latest ${def}.` });
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+// Pull a local branch from origin, fast-forward only (so it can never create a
+// merge commit or leave conflicts). Checks the branch out first if needed.
+app.post('/api/projects/:id/pull', denyWhenReadOnly, async (req, res) => {
+  try {
+    const project = await getProject(req.params.id);
+    if (!project || !project.hasLocal) return res.status(400).json({ error: 'No local checkout — pull runs against a local clone.' });
+    const { branch } = req.body || {};
+    if (!isSafeRef(branch)) return res.status(400).json({ error: 'Invalid branch name' });
+
+    const dir = project.path;
+    const verify = await git(dir, 'rev-parse', '--verify', `refs/heads/${branch}`);
+    if (!verify.ok) return res.status(400).json({ error: `Local branch ${branch} not found` });
+    const status = await git(dir, 'status', '--porcelain');
+    if (status.stdout.trim()) return res.status(400).json({ error: 'Working tree is dirty — commit or stash changes before pulling.' });
+
+    const cur = (await git(dir, 'rev-parse', '--abbrev-ref', 'HEAD')).stdout.trim();
+    if (cur !== branch) {
+      const co = await git(dir, 'checkout', branch);
+      if (!co.ok) return res.status(500).json({ ok: false, error: `Could not checkout ${branch}`, output: (co.stderr || '').trim() });
+    }
+    const pl = await git(dir, 'pull', '--ff-only');
+    const output = (pl.stdout + '\n' + pl.stderr).trim();
+    if (!pl.ok) return res.status(409).json({ ok: false, error: 'Pull is not a fast-forward (local and remote have diverged) — rebase or merge manually.', output });
+    res.json({ ok: true, output: output || `Pulled ${branch} from origin.`, note: cur !== branch ? `Checked out ${branch} to pull it.` : undefined });
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+// Open a pull request for a branch. For a local branch we push it first (so the
+// head exists on the remote), then let `gh pr create --fill` derive title/body
+// from the commits and target the repo's default branch.
+app.post('/api/projects/:id/create-pr', denyWhenReadOnly, async (req, res) => {
+  try {
+    const project = await getProject(req.params.id);
+    if (!project) return res.status(404).json({ error: 'Project not found' });
+    if (!project.hasRemote || !project.owner || !project.repo)
+      return res.status(400).json({ error: 'This project has no GitHub remote — cannot open a PR.' });
+    const { branch, scope } = req.body || {};
+    if (!isSafeRef(branch)) return res.status(400).json({ error: 'Invalid branch name' });
+    const nwo = `${project.owner}/${project.repo}`;
+
+    if (scope === 'local') {
+      if (!project.hasLocal) return res.status(400).json({ error: 'No local checkout' });
+      const dir = project.path;
+      const verify = await git(dir, 'rev-parse', '--verify', `refs/heads/${branch}`);
+      if (!verify.ok) return res.status(400).json({ error: `Local branch ${branch} not found` });
+      const push = await git(dir, 'push', '-u', 'origin', branch);
+      if (!push.ok) return res.status(500).json({ ok: false, error: 'Could not push the branch before opening a PR.', output: (push.stdout + '\n' + push.stderr).trim() });
+    }
+
+    const r = await run('gh', ['pr', 'create', '--repo', nwo, '--head', branch, '--fill']);
+    const output = (r.stdout + '\n' + r.stderr).trim();
+    if (!r.ok) {
+      const exists = /already exists/i.test(output);
+      return res.status(exists ? 409 : 500).json({ ok: false, error: exists ? 'A pull request already exists for this branch.' : 'Could not open a pull request.', output });
+    }
+    const url = (r.stdout.match(/https?:\/\/\S+/) || [])[0] || '';
+    res.json({ ok: true, output: url || output || `Opened a PR for ${branch}.`, url });
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+// Fetch the latest from origin and prune stale remote-tracking branches, so the
+// ahead/behind counts on the dashboard reflect reality. It only updates tracking
+// refs (one-way: GitHub → your local refs) and never touches a branch you work
+// on, so — unlike push/pull/merge — it is exempt from the read-only gate and the
+// dashboard also runs it on a background timer.
+app.post('/api/projects/:id/fetch', async (req, res) => {
+  try {
+    const project = await getProject(req.params.id);
+    if (!project || !project.hasLocal) return res.status(400).json({ error: 'No local checkout to fetch.' });
+    const r = await git(project.path, 'fetch', '--all', '--prune');
+    const output = (r.stdout + '\n' + r.stderr).trim();
+    if (!r.ok) return res.status(500).json({ ok: false, error: 'Fetch failed', output });
+    res.json({ ok: true, output: output || 'Fetched latest from origin (pruned stale branches).' });
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+// Open a project's folder, a terminal, or an editor on it. This is a local OS
+// convenience that never touches git or GitHub, so — like /api/settings — it is
+// exempt from the read-only gate.
+app.post('/api/projects/:id/open', async (req, res) => {
+  try {
+    const project = await getProject(req.params.id);
+    if (!project || !project.hasLocal || !project.path) return res.status(400).json({ error: 'No local checkout to open.' });
+    const { what } = req.body || {};
+    if (!['folder', 'terminal', 'editor'].includes(what)) return res.status(400).json({ error: 'what must be folder | terminal | editor' });
+    if (!fs.existsSync(project.path)) return res.status(400).json({ error: 'Project path no longer exists.' });
+    const r = await openLocation(project.path, what);
+    if (!r.ok) return res.status(500).json({ ok: false, error: r.error || 'Could not open.' });
+    res.json({ ok: true, output: `Opened ${what}.` });
   } catch (e) {
     res.status(500).json({ error: String(e) });
   }
@@ -962,10 +1212,280 @@ app.post('/api/projects/:id/delete-branch', denyWhenReadOnly, async (req, res) =
   }
 });
 
+// Clone a GitHub repo that has no local checkout yet into the projects root, so
+// it becomes a first-class local project.
+app.post('/api/projects/:id/clone', denyWhenReadOnly, async (req, res) => {
+  try {
+    const project = await getProject(req.params.id);
+    if (!project) return res.status(404).json({ error: 'Project not found' });
+    if (project.hasLocal) return res.status(400).json({ error: 'This project already has a local checkout.' });
+    if (!project.hasRemote || !project.nameWithOwner || !project.repo) return res.status(400).json({ error: 'No GitHub repo to clone.' });
+    if (!isSafeName(project.repo)) return res.status(400).json({ error: 'Unsafe repository name.' });
+
+    const dir = path.join(PROJECTS_ROOT, project.repo);
+    if (fs.existsSync(dir)) return res.status(400).json({ error: `A folder named "${project.repo}" already exists in ${PROJECTS_ROOT}.` });
+
+    const r = await run('gh', ['repo', 'clone', project.nameWithOwner, dir]);
+    const output = (r.stdout + '\n' + r.stderr).trim();
+    if (!r.ok) return res.status(500).json({ ok: false, error: 'Clone failed', output });
+    projectCache = { ts: 0, data: null };
+    res.json({ ok: true, output: output || `Cloned ${project.nameWithOwner} to ${dir}.`, newId: `local:${project.repo}` });
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+// Publish a local repo that has no remote to GitHub (creates the repo under your
+// account, wires up origin, and pushes).
+app.post('/api/projects/:id/publish', denyWhenReadOnly, async (req, res) => {
+  try {
+    const project = await getProject(req.params.id);
+    if (!project || !project.hasLocal) return res.status(400).json({ error: 'No local checkout to publish.' });
+    if (project.hasRemote) return res.status(400).json({ error: 'This project already has a GitHub remote.' });
+    const name = project.label;
+    if (!isSafeName(name)) return res.status(400).json({ error: 'Folder name is not a valid GitHub repo name.' });
+
+    const { private: priv } = req.body || {};
+    const visibility = priv === false ? '--public' : '--private';
+    const r = await run('gh', ['repo', 'create', name, '--source', project.path, '--remote', 'origin', '--push', visibility]);
+    const output = (r.stdout + '\n' + r.stderr).trim();
+    if (!r.ok) return res.status(500).json({ ok: false, error: 'Publish failed', output });
+    projectCache = { ts: 0, data: null };
+    res.json({ ok: true, output: output || `Published ${name} to GitHub (${priv === false ? 'public' : 'private'}).` });
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+// Submit a review on a PR: approve / request changes / comment.
+app.post('/api/projects/:id/pr-review', denyWhenReadOnly, async (req, res) => {
+  try {
+    const project = await getProject(req.params.id);
+    if (!project || !project.hasRemote || !project.owner || !project.repo) return res.status(400).json({ error: 'No GitHub remote on this project.' });
+    const { number, action, body } = req.body || {};
+    if (!isPrNumber(number)) return res.status(400).json({ error: 'Invalid PR number' });
+    const flag = { approve: '--approve', 'request-changes': '--request-changes', comment: '--comment' }[action];
+    if (!flag) return res.status(400).json({ error: 'action must be approve | request-changes | comment' });
+    if ((action === 'request-changes' || action === 'comment') && !(body && body.trim()))
+      return res.status(400).json({ error: 'A comment body is required for this review action.' });
+
+    const nwo = `${project.owner}/${project.repo}`;
+    const args = ['pr', 'review', String(number), '--repo', nwo, flag];
+    if (body && body.trim()) args.push('--body', body);
+    const r = await run('gh', args);
+    const output = (r.stdout + '\n' + r.stderr).trim();
+    if (!r.ok) return res.status(500).json({ ok: false, error: 'Review submission failed', output });
+    res.json({ ok: true, output: output || `Submitted "${action}" review on PR #${number}.` });
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+// Toggle a PR between draft and ready-for-review.
+app.post('/api/projects/:id/pr-ready', denyWhenReadOnly, async (req, res) => {
+  try {
+    const project = await getProject(req.params.id);
+    if (!project || !project.hasRemote || !project.owner || !project.repo) return res.status(400).json({ error: 'No GitHub remote on this project.' });
+    const { number, draft } = req.body || {};
+    if (!isPrNumber(number)) return res.status(400).json({ error: 'Invalid PR number' });
+    const nwo = `${project.owner}/${project.repo}`;
+    const args = ['pr', 'ready', String(number), '--repo', nwo];
+    if (draft) args.push('--undo'); // --undo converts a ready PR back to draft
+    const r = await run('gh', args);
+    const output = (r.stdout + '\n' + r.stderr).trim();
+    if (!r.ok) return res.status(500).json({ ok: false, error: 'Could not change PR draft state', output });
+    res.json({ ok: true, output: output || (draft ? `Converted PR #${number} to draft.` : `Marked PR #${number} ready for review.`) });
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+// Re-run the failed jobs of the latest workflow run for a branch.
+app.post('/api/projects/:id/rerun-checks', denyWhenReadOnly, async (req, res) => {
+  try {
+    const project = await getProject(req.params.id);
+    if (!project || !project.hasRemote || !project.owner || !project.repo) return res.status(400).json({ error: 'No GitHub remote on this project.' });
+    const { branch } = req.body || {};
+    if (!isSafeRef(branch)) return res.status(400).json({ error: 'Invalid branch name' });
+    const nwo = `${project.owner}/${project.repo}`;
+
+    const runs = await ghJson(['run', 'list', '--repo', nwo, '--branch', branch, '--limit', '1', '--json', 'databaseId,status,conclusion']);
+    if (!runs || !runs.length) return res.status(400).json({ error: `No workflow run found for ${branch}.` });
+    const runId = runs[0].databaseId;
+    const r = await run('gh', ['run', 'rerun', String(runId), '--failed', '--repo', nwo]);
+    const output = (r.stdout + '\n' + r.stderr).trim();
+    if (!r.ok) return res.status(500).json({ ok: false, error: 'Could not re-run checks', output });
+    res.json({ ok: true, output: output || `Re-running failed jobs for the latest run on ${branch}.` });
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+// Check a branch / PR out in the local clone so you can run it. By PR number we
+// use `gh pr checkout`; by branch name we switch to a local branch, fetching it
+// from origin first if it doesn't exist locally yet.
+app.post('/api/projects/:id/checkout', denyWhenReadOnly, async (req, res) => {
+  try {
+    const project = await getProject(req.params.id);
+    if (!project || !project.hasLocal) return res.status(400).json({ error: 'No local checkout — there is nowhere to check this out.' });
+    const dir = project.path;
+    const { scope, prNumber } = req.body || {};
+    const name = (req.body && (req.body.name || req.body.branch)) || null;
+
+    const status = await git(dir, 'status', '--porcelain');
+    if (status.stdout.trim()) return res.status(400).json({ error: 'Working tree is dirty — commit or stash changes before switching branches.' });
+
+    if (prNumber != null) {
+      if (!isPrNumber(prNumber)) return res.status(400).json({ error: 'Invalid PR number' });
+      // gh infers the repo from the local clone's origin; run it in the repo dir.
+      const r = await run('gh', ['pr', 'checkout', String(prNumber)], { cwd: dir });
+      const output = (r.stdout + '\n' + r.stderr).trim();
+      if (!r.ok) return res.status(500).json({ ok: false, error: `Could not check out PR #${prNumber}`, output });
+      return res.json({ ok: true, output: output || `Checked out PR #${prNumber}.`, note: `You are now on the PR's branch.` });
+    }
+
+    if (!isSafeRef(name)) return res.status(400).json({ error: 'Invalid branch name' });
+    const cur = (await git(dir, 'rev-parse', '--abbrev-ref', 'HEAD')).stdout.trim();
+    if (cur === name) return res.status(400).json({ error: `${name} is already checked out.` });
+
+    const hasLocalBranch = (await git(dir, 'rev-parse', '--verify', `refs/heads/${name}`)).ok;
+    if (!hasLocalBranch) await git(dir, 'fetch', 'origin', name); // create origin/<name> so checkout can track it
+    const co = await git(dir, 'checkout', name);
+    const output = (co.stdout + '\n' + co.stderr).trim();
+    if (!co.ok) return res.status(500).json({ ok: false, error: `Could not check out ${name}`, output });
+    res.json({ ok: true, output: output || `Checked out ${name}.`, note: `You are now on ${name}.` });
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
+
 app.post('/api/refresh', (req, res) => {
   projectCache = { ts: 0, data: null };
   sessions.invalidate();
   res.json({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
+// Cross-project "needs attention" rollup
+// ---------------------------------------------------------------------------
+
+// A deliberately cheap, git-only scan of one local repo: enough to flag what
+// needs attention without the per-branch diff/rev-list work that localStatus
+// does for the one repo you have open.
+async function localAttention(dir) {
+  const def = await detectDefaultBranch(dir);
+  const items = [];
+
+  const st = await git(dir, 'status', '--porcelain');
+  const dirty = st.stdout.split('\n').map((l) => l.replace(/\r$/, '')).filter(Boolean).length;
+  if (dirty) items.push({ level: 'action', text: `${dirty} uncommitted change(s)` });
+
+  const stash = await git(dir, 'stash', 'list');
+  const stashN = stash.stdout.split('\n').filter(Boolean).length;
+  if (stashN) items.push({ level: 'info', text: `${stashN} stash(es) parked` });
+
+  const SEP = '<<GHSEP>>';
+  const ref = await git(dir, 'for-each-ref', `--format=%(refname:short)${SEP}%(upstream:short)${SEP}%(upstream:track)`, 'refs/heads');
+  let unpushed = 0, gone = 0;
+  for (const line of ref.stdout.split('\n').map((l) => l.replace(/\r$/, '')).filter(Boolean)) {
+    const [name, up, track] = line.split(SEP);
+    const t = parseTrack(track);
+    if (name === def) {
+      if (t.ahead) items.push({ level: 'action', text: `default branch ${name} is ${t.ahead} commit(s) unpushed` });
+      continue;
+    }
+    if (!up || t.ahead) unpushed++;
+    else if (t.gone) gone++;
+  }
+  if (unpushed) items.push({ level: 'action', text: `${unpushed} branch(es) with unpushed work / no upstream` });
+  if (gone) items.push({ level: 'cleanup', text: `${gone} branch(es) whose upstream is gone — deletable` });
+
+  const merged = await git(dir, 'branch', '--merged', def, '--format=%(refname:short)');
+  const mergedN = merged.stdout.split('\n').map((s) => s.trim()).filter((b) => b && b !== def).length;
+  if (mergedN) items.push({ level: 'cleanup', text: `${mergedN} branch(es) merged into ${def} — safe to delete` });
+
+  return items;
+}
+
+app.get('/api/summary', async (req, res) => {
+  try {
+    const projects = await listProjects();
+    const byNwo = new Map();
+    for (const p of projects) if (p.nameWithOwner) byNwo.set(p.nameWithOwner.toLowerCase(), p);
+
+    const map = new Map(); // id -> { id, label, nameWithOwner, items[] }
+    const entryFor = (id, label, nameWithOwner) => {
+      if (!map.has(id)) map.set(id, { id, label, nameWithOwner: nameWithOwner || null, items: [] });
+      return map.get(id);
+    };
+    const entryForNwo = (nwo) => {
+      const p = byNwo.get(nwo.toLowerCase());
+      return p ? entryFor(p.id, p.label, p.nameWithOwner) : entryFor(`remote:${nwo}`, nwo, nwo);
+    };
+
+    // Local half — fast, runs git only.
+    const locals = projects.filter((p) => p.hasLocal && p.path);
+    await mapLimit(locals, 6, async (p) => {
+      const items = await localAttention(p.path);
+      if (items.length) entryFor(p.id, p.label, p.nameWithOwner).items.push(...items);
+    });
+
+    // Remote half — two cheap cross-repo searches (one gh call each).
+    const mine = (await ghJson(['search', 'prs', '--author=@me', '--state=open', '--limit', '100', '--json', 'repository,number,title,url,isDraft'])) || [];
+    const reviews = (await ghJson(['search', 'prs', '--review-requested=@me', '--state=open', '--limit', '100', '--json', 'repository,number,title,url'])) || [];
+
+    const mineByRepo = new Map();
+    for (const pr of mine) {
+      const k = pr.repository.nameWithOwner;
+      if (!mineByRepo.has(k)) mineByRepo.set(k, []);
+      mineByRepo.get(k).push(pr);
+    }
+    for (const [nwo, list] of mineByRepo) {
+      const drafts = list.filter((p) => p.isDraft).length;
+      entryForNwo(nwo).items.push({
+        level: 'action',
+        text: `${list.length} open PR(s) you authored${drafts ? ` (${drafts} draft)` : ''}`,
+        prs: list.map((p) => ({ number: p.number, title: p.title, url: p.url })),
+      });
+    }
+    for (const pr of reviews) {
+      entryForNwo(pr.repository.nameWithOwner).items.push({
+        level: 'action',
+        text: `your review is requested: PR #${pr.number} — ${pr.title}`,
+        url: pr.url,
+      });
+    }
+
+    const W = { action: 3, cleanup: 2, info: 1 };
+    const out = [...map.values()]
+      .filter((e) => e.items.length)
+      .map((e) => ({ ...e, score: e.items.reduce((s, i) => s + (W[i.level] || 1), 0) }))
+      .sort((a, b) => b.score - a.score);
+
+    res.json({ projects: out, scannedLocal: locals.length });
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+// PRs awaiting your review — the basis for the optional desktop notifications.
+// One cheap cross-repo gh call; the client diffs successive polls itself.
+app.get('/api/notifications', async (req, res) => {
+  try {
+    const reviews = (await ghJson(['search', 'prs', '--review-requested=@me', '--state=open', '--limit', '50', '--json', 'repository,number,title,url,updatedAt'])) || [];
+    res.json({
+      reviewRequested: reviews.map((p) => ({
+        key: `${p.repository.nameWithOwner}#${p.number}`,
+        repo: p.repository.nameWithOwner,
+        number: p.number,
+        title: p.title,
+        url: p.url,
+        updatedAt: p.updatedAt,
+      })),
+    });
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
 });
 
 // "Working on now" — every local Claude Code session you have typed into in the
@@ -1007,6 +1527,55 @@ async function checkTooling() {
   if (!gh.ok) warn.push('gh (GitHub CLI) was not found on PATH — GitHub data and actions will not work.');
   else if (!(await run('gh', ['auth', 'status'])).ok) warn.push('gh is installed but not authenticated — run `gh auth login`. GitHub data will be unavailable until then.');
   return warn;
+}
+
+// Launch a detached GUI/console command via the platform shell, resolving ok
+// unless the spawn itself fails almost immediately (e.g. binary not found).
+function shellOpen(command) {
+  return new Promise((resolve) => {
+    try {
+      const child = spawn(command, { detached: true, stdio: 'ignore', shell: true });
+      let settled = false;
+      child.on('error', (e) => { if (!settled) { settled = true; resolve({ ok: false, error: e.message }); } });
+      child.unref();
+      setTimeout(() => { if (!settled) { settled = true; resolve({ ok: true }); } }, 400);
+    } catch (e) {
+      resolve({ ok: false, error: e.message });
+    }
+  });
+}
+
+// First editor on PATH from a small priority list (VS Code, then JetBrains, then
+// Sublime). Returns the launch command, or null if none is installed.
+async function findEditor() {
+  const candidates = ['code', 'webstorm', 'idea', 'subl'];
+  const lookup = process.platform === 'win32' ? (c) => run('cmd', ['/c', 'where', c]) : (c) => run('which', [c]);
+  for (const c of candidates) {
+    const r = await lookup(c);
+    if (r.ok && r.stdout.trim()) return c;
+  }
+  return null;
+}
+
+async function openLocation(dir, what) {
+  const q = `"${dir}"`;
+  const plat = process.platform;
+  if (what === 'folder') {
+    if (plat === 'win32') return shellOpen(`explorer ${q}`);
+    if (plat === 'darwin') return shellOpen(`open ${q}`);
+    return shellOpen(`xdg-open ${q}`);
+  }
+  if (what === 'terminal') {
+    if (plat === 'win32') return shellOpen(`start "" cmd /k cd /d ${q}`);
+    if (plat === 'darwin') return shellOpen(`open -a Terminal ${q}`);
+    return shellOpen(`x-terminal-emulator --working-directory=${q}`);
+  }
+  if (what === 'editor') {
+    const editor = await findEditor();
+    if (!editor) return { ok: false, error: 'No supported editor found on PATH (looked for code, webstorm, idea, subl).' };
+    return shellOpen(`${editor} ${q}`);
+  }
+  return { ok: false, error: 'Unknown target' };
 }
 
 function openBrowser(url) {

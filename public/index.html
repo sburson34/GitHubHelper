@@ -25,6 +25,7 @@
           <span class="slider"></span>
           <span class="switch-text">Read-only</span>
         </label>
+        <button id="notify-btn" title="Desktop notifications when a pull request is waiting on your review">🔔 Notify</button>
         <button id="refresh-btn" title="Re-scan projects">↻ Refresh</button>
       </div>
     </header>
@@ -40,6 +41,10 @@
 
     <main>
       <div id="projects-view" class="view">
+        <div class="overview">
+          <button id="overview-toggle" class="tool-btn" aria-expanded="false">▸ Across all projects — what needs attention</button>
+          <div id="overview-body" hidden></div>
+        </div>
         <div id="content">
           <div class="placeholder">
             <p>Search for and select a project above to see the full status of its branches.</p>
