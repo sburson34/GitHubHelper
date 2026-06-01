@@ -65,7 +65,10 @@ REM --- free the file if a running instance is holding it ----------------------
 if exist "%EXE%" call :stop_running
 
 echo Downloading GitHubHelper %LATEST% into "%DIR%" ...
-gh release download %LATEST% --repo %REPO% --pattern githubhelper.exe --dir "%DIR%" --clobber
+REM %DIR% ends with a backslash; strip it for --dir so the closing quote is not
+REM read as an escaped quote (which would swallow the following --clobber).
+set "DLDIR=%DIR:~0,-1%"
+gh release download %LATEST% --repo %REPO% --pattern githubhelper.exe --dir "%DLDIR%" --clobber
 if errorlevel 1 goto dlerr
 > "%VERFILE%" echo %LATEST%
 echo Updated to %LATEST%.
