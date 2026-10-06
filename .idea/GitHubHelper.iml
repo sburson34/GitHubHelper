@@ -1,7 +1,18 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <module type="WEB_MODULE" version="4">
   <component name="NewModuleRootManager">
-    <content url="file://$MODULE_DIR$" />
+    <content url="file://$MODULE_DIR$">
+      <excludePattern pattern="bin" />
+      <excludePattern pattern="obj" />
+      <excludePattern pattern=".next" />
+      <excludePattern pattern=".expo" />
+      <excludePattern pattern=".gradle" />
+      <excludePattern pattern=".cxx" />
+      <excludePattern pattern="TestResults" />
+      <excludePattern pattern="test-results" />
+      <excludePattern pattern="playwright-report" />
+      <excludePattern pattern=".turbo" />
+    </content>
     <orderEntry type="inheritedJdk" />
     <orderEntry type="sourceFolder" forTests="false" />
   </component>
