@@ -155,8 +155,9 @@ async function summarizeWithClaude(prompts, key) {
         'anthropic-version': '2023-06-01',
       },
       body: JSON.stringify({
-        model: 'claude-haiku-4-5-20251001',
-        max_tokens: 60,
+        model: 'claude-haiku-5-5',
+        max_tokens: 1024, // thinking is on by default and counts against the cap
+        output_config: { effort: 'low' },
         messages: [{
           role: 'user',
           content:
