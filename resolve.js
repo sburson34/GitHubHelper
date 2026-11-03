@@ -17,7 +17,7 @@ const fs = require('fs');
 const path = require('path');
 const { getApiKey } = require('./sessions');
 
-const MODEL = 'claude-sonnet-4-6';
+const MODEL = 'claude-sonnet-5-5';
 const MAX_FILES = 20;                 // beyond this, bail — too big to auto-resolve
 const MAX_FILE_BYTES = 48 * 1024;     // ~12k output tokens; bigger files bail
 const MAX_TOKENS = 16000;
